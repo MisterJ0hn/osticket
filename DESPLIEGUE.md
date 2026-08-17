@@ -4,8 +4,8 @@ Levanta los dos servicios con un solo `docker compose`:
 
 | Servicio | Contenedor | Puerto host | Qué es |
 |---|---|---|---|
-| `osticket` | `osticket_app` | **9090** → 80 | osTicket 1.18 (PHP 8.2 + Apache) |
-| `api` | `osticket_api` | **9091** → 8000 | Fachada REST (FastAPI) sobre osTicket |
+| `osticket` | `osticket_app` | **7090** → 80 | osTicket 1.18 (PHP 8.2 + Apache) |
+| `api` | `osticket_api` | **7091** → 8000 | Fachada REST (FastAPI) sobre osTicket |
 
 La **MySQL no va en un contenedor**: se usa la que ya corre en la misma máquina,
 base **`codi_soporte`** (ya migrada, con datos). Ambos contenedores llegan a ella
@@ -61,8 +61,8 @@ Si hay `ufw` activo:
 
 ```bash
 sudo ufw allow from 172.28.0.0/24 to any port 3306
-sudo ufw allow 9090/tcp
-sudo ufw allow 9091/tcp
+sudo ufw allow 7090/tcp
+sudo ufw allow 7091/tcp
 ```
 
 ### 1.4 Comprobar que la base está donde se cree
@@ -96,7 +96,7 @@ docker compose ps          # ambos deben quedar (healthy)
 Lo mínimo a completar en el `.env`:
 
 - `DB_USER` / `DB_PASSWORD` — el usuario del punto 1.2
-- `OSTICKET_URL` — URL pública, ej. `http://192.168.1.50:9090` (sin barra final)
+- `OSTICKET_URL` — URL pública, ej. `http://192.168.1.50:7090` (sin barra final)
 - `API_KEYS` — al menos una clave; con esto vacío la API rechaza todo
 - `OSTICKET_API_KEY` — se obtiene en el paso 4 de la verificación
 
@@ -111,23 +111,23 @@ correo ni los tokens, y las sesiones dejan de validar.
 ### 3.1 osTicket conecta y ve los datos migrados
 
 ```bash
-curl -I http://SERVIDOR:9090
+curl -I http://SERVIDOR:7090
 docker compose logs osticket | grep -i "unable to connect"   # no debe salir nada
 ```
 
-En el navegador, `http://SERVIDOR:9090` debe mostrar el helpdesk **con los
+En el navegador, `http://SERVIDOR:7090` debe mostrar el helpdesk **con los
 tickets ya migrados**. Si aparece vacío o pide instalar, está pegando a otra
 base.
 
 ### 3.2 El login de staff funciona
 
-Entrar a `http://SERVIDOR:9090/scp/`. Si el login falla o las cuentas de correo
+Entrar a `http://SERVIDOR:7090/scp/`. Si el login falla o las cuentas de correo
 aparecen con clave inválida, el `SECRET_SALT` no coincide con el de la base.
 
 ### 3.3 La API ve la MISMA base
 
 ```bash
-curl http://SERVIDOR:9091/salud
+curl http://SERVIDOR:7091/salud
 ```
 
 Debe responder:
@@ -152,17 +152,17 @@ helpdesk).
 responde bien si además está leyendo la base.
 
 ```bash
-curl -H "X-API-Key: tu-clave" http://SERVIDOR:9091/api/v1/catalogos/estados   # 200 + lista
-curl http://SERVIDOR:9091/api/v1/catalogos/estados                            # 403
+curl -H "X-API-Key: tu-clave" http://SERVIDOR:7091/api/v1/catalogos/estados   # 200 + lista
+curl http://SERVIDOR:7091/api/v1/catalogos/estados                            # 403
 ```
 
 Listado de tickets (necesita el email del dueño):
 
 ```bash
-curl -H "X-API-Key: tu-clave" "http://SERVIDOR:9091/api/v1/tickets?email=alguien@dominio.cl"
+curl -H "X-API-Key: tu-clave" "http://SERVIDOR:7091/api/v1/tickets?email=alguien@dominio.cl"
 ```
 
-Documentación interactiva en `http://SERVIDOR:9091/docs`.
+Documentación interactiva en `http://SERVIDOR:7091/docs`.
 
 ### 3.5 Creación de ticket — el paso que suele fallar
 

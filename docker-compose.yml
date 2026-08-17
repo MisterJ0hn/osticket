@@ -37,7 +37,7 @@ services:
       OSTICKET_TRUSTED_PROXIES: ${OSTICKET_TRUSTED_PROXIES:-}
       OSTICKET_LOCAL_NETWORKS: ${OSTICKET_LOCAL_NETWORKS:-127.0.0.0/8}
     ports:
-      - "${OSTICKET_PUERTO:-9093}:80"
+      - "${OSTICKET_PUERTO:-7090}:80"
     volumes:
       # Los adjuntos viven fuera del contenedor: se conservan al reconstruir.
       - osticket_attachments:/var/www/html/attachments
@@ -103,7 +103,7 @@ services:
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
     ports:
-      - "${API_PUERTO:-9094}:8000"
+      - "${API_PUERTO:-7091}:8000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
