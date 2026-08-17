@@ -1,0 +1,141 @@
+# Despliegue de osTicket + osticket_api en el servidor Linux.
+#
+#   cp .env.example .env   # y completar credenciales
+#   docker compose up -d
+#
+# La MySQL NO va en un contenedor: se usa la que ya corre en la misma máquina
+# Linux (base codi_soporte, ya migrada con datos). Los contenedores llegan a
+# ella por host.docker.internal, que resuelve gracias al extra_hosts
+# "host-gateway" de cada servicio.
+#
+# Antes del primer arranque hay que preparar esa MySQL (bind-address y GRANT
+# para la subred 172.28.0.0/24). Los detalles están en DESPLIEGUE.md.
+
+name: codi-soporte
+
+services:
+  # ─────────────────────────────────────────────────────────────
+  # osTicket (PHP + Apache)
+  # ─────────────────────────────────────────────────────────────
+  osticket:
+    build:
+      context: ./osTicket
+    image: codi/osticket:1.18
+    container_name: osticket_app
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-America/Santiago}
+      # Las lee docker/ost-config.docker.php con getenv(). Así la imagen no
+      # lleva credenciales dentro y sirve para cualquier entorno.
+      OSTICKET_DBHOST: ${DB_HOST:-host.docker.internal}
+      OSTICKET_DBNAME: ${DB_NAME:-codi_soporte}
+      OSTICKET_DBUSER: ${DB_USER}
+      OSTICKET_DBPASS: ${DB_PASSWORD}
+      OSTICKET_TABLE_PREFIX: ${DB_TABLE_PREFIX:-ost_}
+      OSTICKET_SECRET_SALT: ${OSTICKET_SECRET_SALT}
+      OSTICKET_ADMIN_EMAIL: ${OSTICKET_ADMIN_EMAIL:-desarrollo.ti@alfaromadariaga.cl}
+      OSTICKET_TRUSTED_PROXIES: ${OSTICKET_TRUSTED_PROXIES:-}
+      OSTICKET_LOCAL_NETWORKS: ${OSTICKET_LOCAL_NETWORKS:-127.0.0.0/8}
+    ports:
+      - "${OSTICKET_PUERTO:-9090}:80"
+    volumes:
+      # Los adjuntos viven fuera del contenedor: se conservan al reconstruir.
+      - osticket_attachments:/var/www/html/attachments
+      # Se monta encima del ost-config.php de la imagen. El original queda
+      # intacto (apunta al hosting viejo) y los composes de osTicket/ siguen
+      # funcionando igual que antes.
+      - ./osTicket/docker/ost-config.docker.php:/var/www/html/include/ost-config.php:ro
+      # PassEnv de las variables de arriba, para que además de getenv() queden
+      # en $_SERVER. No se toca docker/apache.conf porque lo comparten los
+      # otros dos composes.
+      - ./osTicket/docker/apache-env.conf:/etc/apache2/conf-enabled/zz-osticket-env.conf:ro
+    extra_hosts:
+      # Permite alcanzar la MySQL del host desde dentro del contenedor.
+      - "host.docker.internal:host-gateway"
+    networks:
+      soporte:
+        ipv4_address: 172.28.0.10
+    healthcheck:
+      # Solo comprueba que Apache atiende. A propósito no toca la aplicación:
+      # si la base está caída se quiere ver el error de osTicket en el
+      # navegador, no un contenedor marcado unhealthy y reiniciándose.
+      test: ["CMD", "php", "-r", "exit(@fsockopen('127.0.0.1', 80) ? 0 : 1);"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ─────────────────────────────────────────────────────────────
+  # osticket_api (FastAPI)
+  # ─────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: ./osticket_api
+    image: codi/osticket-api:1.0.0
+    container_name: osticket_api
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-America/Santiago}
+      APP_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # MISMA base que osTicket, a propósito: si apuntaran a bases distintas
+      # los tickets se crearían pero no aparecerían en los listados.
+      MYSQL_HOST: ${DB_HOST:-host.docker.internal}
+      MYSQL_PORT: ${DB_PORT:-3306}
+      MYSQL_DB: ${DB_NAME:-codi_soporte}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      OSTICKET_TABLE_PREFIX: ${DB_TABLE_PREFIX:-ost_}
+      # URL pública del host (decisión del proyecto): el tráfico sale del
+      # contenedor y vuelve a entrar por el puerto publicado de osTicket.
+      # Ojo con la IP que ve osTicket al validar la API Key: ver DESPLIEGUE.md.
+      OSTICKET_URL: ${OSTICKET_URL}
+      OSTICKET_API_KEY: ${OSTICKET_API_KEY}
+      OSTICKET_TIMEOUT: ${OSTICKET_TIMEOUT:-15}
+      OSTICKET_FALLBACK_SQL: ${OSTICKET_FALLBACK_SQL:-true}
+      API_KEYS: ${API_KEYS}
+      IPS_PERMITIDAS: ${IPS_PERMITIDAS:-}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+    ports:
+      - "${API_PUERTO:-9091}:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      # service_started, no service_healthy: la API llega a osTicket por el
+      # host y ya sabe manejar que no responda (fallback SQL). Un osTicket
+      # enfermo no debe impedir que la API levante.
+      osticket:
+        condition: service_started
+    networks:
+      soporte:
+        ipv4_address: 172.28.0.20
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/salud')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  soporte:
+    driver: bridge
+    ipam:
+      config:
+        # Subred fija a propósito: da un rango estable para el GRANT de MySQL
+        # y hace predecible la IP de origen que verá osTicket al validar la
+        # API Key. El gateway (172.28.0.1) es el host Linux.
+        - subnet: 172.28.0.0/24
+
+volumes:
+  osticket_attachments:

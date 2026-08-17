@@ -1,0 +1,16 @@
+# Versiones alineadas con estado_diario/backend para no tener dos criterios
+# distintos de FastAPI/pydantic conviviendo en el mismo servidor.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.1
+# EmailStr de pydantic necesita este paquete aparte.
+email-validator==2.2.0
+sqlalchemy==2.0.36
+# PyMySQL en vez de mysqlclient: es Python puro y no exige toolchain de C,
+# que en Windows (entorno de desarrollo de este proyecto) es el problema
+# habitual al instalar dependencias.
+pymysql==1.1.1
+# Cliente HTTP de la API nativa de osTicket.
+httpx==0.28.1
+python-dotenv==1.0.1

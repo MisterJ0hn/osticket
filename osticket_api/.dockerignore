@@ -1,0 +1,19 @@
+# El Dockerfile solo copia requirements.txt y app/, pero el contexto se sube
+# entero al daemon: sin esto, el .venv (cientos de MB) viaja en cada build.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+tests/
+requirements-dev.txt
+
+# Las credenciales llegan por el entorno del contenedor (docker-compose.yml),
+# nunca dentro de la imagen.
+.env
+.env.*
+
+.git
+.gitignore
+*.md

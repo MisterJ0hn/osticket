@@ -1,0 +1,14 @@
+# Credenciales del despliegue. Solo se versiona .env.example.
+.env
+osTicket/.env
+osticket_api/.env
+
+# Entornos y cachés de Python
+osticket_api/.venv/
+osticket_api/venv/
+**/__pycache__/
+*.py[cod]
+osticket_api/.pytest_cache/
+
+# Dump de la base: 22 MB y lleva datos reales del helpdesk.
+osTicket/01_dump.sql

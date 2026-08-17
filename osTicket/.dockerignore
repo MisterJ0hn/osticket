@@ -1,0 +1,14 @@
+.env
+.git
+.gitignore
+docker-compose.yml
+*.md
+
+# El Dockerfile solo copia docker/ y upload/, pero el resto igual se sube al
+# daemon como contexto de build. Excluirlo no cambia la imagen, solo acorta
+# el build (01_dump.sql pesa 22 MB).
+01_dump.sql
+muestra.xlsx
+importar_tickets.php
+scripts/
+docker-compose.*.yml

@@ -1,0 +1,30 @@
+# Compose SOLO para pruebas locales. No reemplaza a docker-compose.yml:
+# aquel despliega osTicket en el servidor físico.
+#
+#   docker compose -f docker-compose.local.yml up -d
+#   docker compose -f docker-compose.local.yml down
+#
+# La base NO va en un contenedor: se usa la MySQL de XAMPP que ya corre en
+# el host (base temposoft_soporte), que es la fuente de datos elegida. Por
+# eso este archivo solo levanta osTicket, igual que docker-compose.yml, y
+# se apoya en el mismo extra_hosts para llegar al host.
+#
+# La configuración de conexión va en docker/ost-config.local.php, montado
+# encima del ost-config.php original (que se deja intacto).
+
+services:
+  osticket:
+    build: .
+    container_name: osticket_app
+    ports:
+      - "8080:80"
+    volumes:
+      - osticket_attachments:/var/www/html/attachments
+      - ./docker/ost-config.local.php:/var/www/html/include/ost-config.php:ro
+    extra_hosts:
+      # Permite que el contenedor resuelva el host para llegar a su MySQL.
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  osticket_attachments:

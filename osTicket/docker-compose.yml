@@ -1,0 +1,17 @@
+version: '3.3'
+
+services:
+  osticket:
+    build: .
+    container_name: osticket_app
+    ports:
+      - "8080:80"
+    volumes:
+      - osticket_attachments:/var/www/html/attachments
+      - ./upload/include/ost-config.php:/var/www/html/include/ost-config.php:ro,z
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  osticket_attachments:
