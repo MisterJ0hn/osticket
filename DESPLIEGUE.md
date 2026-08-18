@@ -230,6 +230,29 @@ Cambios en el `.env` requieren `docker compose up -d` (recrea el contenedor);
 
 ## 6. Problemas frecuentes
 
+**`'name' does not match any of the regexes: '^x-'`**
+Se está usando **Compose V1** (`docker-compose`, con guion), que no entiende la
+Compose Spec. Por eso el archivo lleva `version: "2.4"` y el nombre del
+proyecto va en `COMPOSE_PROJECT_NAME` del `.env` en vez de la clave `name:`.
+
+Comprobar qué hay instalado:
+
+```bash
+docker compose version     # V2 (plugin) — es la recomendada
+docker-compose --version   # V1 (script Python) — sin soporte desde julio 2023
+```
+
+Compose V1 ya no recibe parches ni de seguridad. Conviene instalar el plugin V2
+y usar siempre `docker compose` (sin guion):
+
+```bash
+sudo apt-get update && sudo apt-get install -y docker-compose-plugin
+docker compose version
+```
+
+Con V2 el `version: "2.4"` solo produce un aviso de atributo obsoleto; el
+archivo funciona igual en ambas.
+
 **"Unable to connect to the database" en osTicket**
 Es siempre uno de los tres del punto 1: `bind-address` en loopback, el usuario
 sin `@'172.28.0.%'`, o el firewall. Probar desde dentro del contenedor:

@@ -11,7 +11,17 @@
 # Antes del primer arranque hay que preparar esa MySQL (bind-address y GRANT
 # para la subred 172.28.0.0/24). Los detalles están en DESPLIEGUE.md.
 
-name: codi-soporte
+# Compose V1 (docker-compose 1.x) no entiende la Compose Spec y exige este
+# "version"; sin él interpreta el archivo como formato v1 y falla con
+# "'name' does not match any of the regexes: '^x-'". Compose V2 lo acepta
+# igual, solo avisa de que el atributo está obsoleto.
+#
+# El nombre del proyecto NO va en la clave "name:" de la Compose Spec (rompe
+# en V1): va en COMPOSE_PROJECT_NAME dentro del .env, que ambas versiones leen.
+#
+# Se eligió 2.4 y no 3.x porque el formato 3 no admite el "condition" de
+# depends_on que usa el servicio api.
+version: "2.4"
 
 services:
   # ─────────────────────────────────────────────────────────────
