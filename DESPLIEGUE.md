@@ -313,6 +313,36 @@ poner `DB_HOST=172.28.0.1` en el `.env` (el gateway de la red es el host).
 Conecta, pero a una base sin las tablas `ost_*` o con otro prefijo. Revisar
 `DB_NAME` y `DB_TABLE_PREFIX`.
 
+**Las imágenes no aparecen en el ticket, pero el ticket se crea bien (201)**
+osTicket descarta los adjuntos de la API **en silencio** cuando están
+deshabilitados (`api.tickets.php:85` hace `$data['attachments'] = array()` y
+sigue). Comprobarlo sin entrar al servidor:
+
+```bash
+curl -s http://SERVIDOR:7091/salud    # el campo "adjuntos" lo dice
+```
+
+O directo en la base:
+
+```sql
+SELECT value FROM codi_soporte.ost_config
+WHERE namespace='core' AND `key`='allow_attachments';
+```
+
+Si la fila no existe o vale 0, osTicket los está descartando. Se activa en
+**Panel Admin → Settings → Tickets → Allow Attachments**, o:
+
+```sql
+INSERT INTO codi_soporte.ost_config (namespace, `key`, value)
+VALUES ('core', 'allow_attachments', '1')
+ON DUPLICATE KEY UPDATE value = '1';
+```
+
+Ojo: por la API los adjuntos quedan como **archivos adjuntos del mensaje**, no
+incrustados dentro del texto como cuando se pegan en el editor web. osTicket
+solo admite el `cid` de incrustación por el canal de correo, no por JSON
+(`api.tickets.php:54`).
+
 **Los tickets se crean "en modo degradado" y se pierden los adjuntos**
 La API nativa falló y entró el fallback SQL, que no guarda adjuntos. Desde la
 respuesta ya se ve la causa (`mensaje` lleva el motivo); en el log está completa:

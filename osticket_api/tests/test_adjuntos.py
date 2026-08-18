@@ -157,3 +157,67 @@ def test_el_mensaje_avisa_de_los_adjuntos_perdidos(cliente, fallback):
 def test_sin_adjuntos_no_habla_de_adjuntos(cliente, fallback):
     respuesta = cliente.post("/api/v1/tickets", json=TICKET, headers=CABECERAS)
     assert "adjunto" not in respuesta.json()["mensaje"].lower()
+
+
+# ─────────────────────────────────────────────────────────────
+# Cuerpo del mensaje: data URI (RFC 2397)
+# ─────────────────────────────────────────────────────────────
+# El CRM manda el mensaje como "data:text/html;charset=utf-8,<p>...</p>" para
+# que llegue con formato. La API nativa lo interpreta sola; el fallback SQL
+# escribe directo en la base y tenía que hacerlo a mano — no lo hacía, y el
+# prefijo quedaba a la vista del agente dentro del ticket.
+
+from app.core import rfc2397  # noqa: E402
+
+
+@pytest.mark.parametrize("entrada, texto, formato", [
+    ("data:text/html;charset=utf-8,<p>Hola</p>", "<p>Hola</p>", "html"),
+    ("data:text/plain;charset=utf-8,Hola", "Hola", "text"),
+    ("data:text/html,<p>Sin charset</p>", "<p>Sin charset</p>", "html"),
+    ("data:text/html;base64,PHA+SG9sYTwvcD4=", "<p>Hola</p>", "html"),
+    # Lo que no es data URI se guarda tal cual, como texto plano.
+    ("Mensaje pelado", "Mensaje pelado", "text"),
+    # Un "data:" mal formado no debe hacer perder el mensaje.
+    ("data:roto-sin-coma", "data:roto-sin-coma", "text"),
+])
+def test_parseo_del_cuerpo(entrada, texto, formato):
+    resultado = rfc2397.parsear_mensaje(entrada)
+    assert resultado.texto == texto
+    assert resultado.formato == formato
+
+
+def test_el_prefijo_data_no_llega_a_la_base(monkeypatch):
+    """Regresión del caso reportado: el agente veía el data URI crudo."""
+    from app.repositories import ticket_write_repo
+
+    escrito = {}
+
+    class CxFalsa:
+        def execute(self, stmt, params=None):
+            sql = str(stmt)
+            if "thread_entry" in sql and "INSERT" in sql:
+                escrito.update(params)
+            return self
+        def first(self): return None
+        def scalar(self): return None
+        def scalar_one(self): return 0
+        @property
+        def lastrowid(self): return 1
+        @property
+        def rowcount(self): return 1
+
+    monkeypatch.setattr(ticket_write_repo, "_resolver_usuario",
+                        lambda *a, **k: (5, 7))
+    monkeypatch.setattr(ticket_write_repo, "_datos_del_topic", lambda *a, **k: {})
+    monkeypatch.setattr(ticket_write_repo, "_estado_por_defecto", lambda *a, **k: 1)
+    monkeypatch.setattr(ticket_write_repo, "_generar_numero", lambda *a, **k: "483920")
+    monkeypatch.setattr(ticket_write_repo, "_config", lambda *a, **k: "1")
+
+    ticket_write_repo.crear_ticket(
+        CxFalsa(), email="a@b.cl", asunto="Prueba",
+        mensaje="data:text/html;charset=utf-8,<p>se aumenta limite</p>",
+    )
+
+    assert not escrito["cuerpo"].startswith("data:")
+    assert escrito["cuerpo"] == "<p>se aumenta limite</p>"
+    assert escrito["formato"] == "html"

@@ -24,6 +24,7 @@ from typing import Any, Dict, Optional, Tuple
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
+from app.core import rfc2397
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -349,6 +350,14 @@ def crear_ticket(
         {"ticket_id": ticket_id},
     ).lastrowid
 
+    # El mensaje puede venir como data URI ("data:text/html;charset=utf-8,...")
+    # para indicar que es HTML. La API nativa lo interpreta sola; acá, que se
+    # escribe directo en la base, hay que hacerlo a mano o el prefijo queda a
+    # la vista del agente dentro del ticket. Y el formato tampoco se puede dar
+    # por supuesto: marcar como HTML un texto plano hace que osTicket no
+    # respete los saltos de línea.
+    cuerpo = rfc2397.parsear_mensaje(mensaje)
+
     conexion.execute(
         text(f"""
             INSERT INTO {P}thread_entry
@@ -356,14 +365,15 @@ def crear_ticket(
                  title, body, format, ip_address, created, updated)
             VALUES
                 (0, :thread_id, 0, :user_id, 'M', 0, :poster, 'API',
-                 :titulo, :cuerpo, 'html', :ip, NOW(), NOW())
+                 :titulo, :cuerpo, :formato, :ip, NOW(), NOW())
         """),
         {
             "thread_id": thread_id,
             "user_id": user_id,
             "poster": (nombre or email)[:128],
             "titulo": asunto[:255],
-            "cuerpo": mensaje,
+            "cuerpo": cuerpo.texto,
+            "formato": cuerpo.formato,
             "ip": (ip_origen or "")[:64],
         },
     )

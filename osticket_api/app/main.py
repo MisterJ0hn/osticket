@@ -44,7 +44,35 @@ async def lifespan(app: FastAPI):
         logger.error("Base mal configurada: %s", problema)
     else:
         _avisar_de_clientes()
+        _avisar_de_adjuntos()
     yield
+
+
+def _avisar_de_adjuntos() -> None:
+    """Avisa si osTicket va a descartar los adjuntos sin decir nada.
+
+    Es el peor de los fallos posibles de esta API: el ticket se crea, la
+    respuesta dice 201, y las imágenes no llegan a ninguna parte. Sin este
+    aviso solo se descubre cuando alguien abre el ticket y no encuentra la
+    captura que el usuario juraba haber enviado.
+    """
+    from app.core import database
+    from app.repositories import ticket_repo
+
+    try:
+        with database.engine.connect() as conexion:
+            habilitados = ticket_repo.adjuntos_habilitados(conexion)
+    except Exception:
+        logger.exception("No se pudo comprobar si osTicket acepta adjuntos")
+        return
+
+    if not habilitados:
+        logger.error(
+            "osTicket tiene los adjuntos DESHABILITADOS (ost_config."
+            "allow_attachments): descartará en silencio los que envíe esta "
+            "API y los tickets quedarán sin las imágenes. Activarlo en Panel "
+            "Admin -> Settings -> Tickets -> Allow Attachments."
+        )
 
 
 def _avisar_de_clientes() -> None:
@@ -137,14 +165,33 @@ async def manejar_error_no_controlado(request: Request, exc: Exception):
 app.include_router(api_router)
 
 
+def _estado_de_adjuntos() -> str:
+    from app.core import database
+    from app.repositories import ticket_repo
+
+    try:
+        with database.engine.connect() as conexion:
+            return "ok" if ticket_repo.adjuntos_habilitados(conexion) else (
+                "DESHABILITADOS en osTicket: los descartará en silencio"
+            )
+    except Exception:
+        return "no se pudo comprobar"
+
+
 @app.get("/salud", tags=["servicio"], summary="Estado del servicio")
 def salud():
     """Sin autenticación: lo consulta el monitor/orquestador."""
     base_ok = verificar_conexion()
     problema = verificar_esquema() if base_ok else None
+    # Se publica acá porque es un fallo que no se ve de ninguna otra forma:
+    # con los adjuntos deshabilitados osTicket los descarta sin error y los
+    # tickets quedan sin las imágenes.
+    adjuntos = _estado_de_adjuntos() if base_ok else "desconocido"
+
     return {
         "exito": base_ok and not problema,
         "base_datos": "ok" if base_ok else "sin conexión",
+        "adjuntos": adjuntos,
         # Distingue "no conecto" de "conecto a la base equivocada", que es el
         # fallo silencioso: la conexión funciona pero los datos no son los del
         # helpdesk.

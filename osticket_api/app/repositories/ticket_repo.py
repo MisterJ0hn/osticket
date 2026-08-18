@@ -385,6 +385,31 @@ def obtener_estado(conexion: Connection, numero: str,
     }
 
 
+def adjuntos_habilitados(conexion: Connection) -> bool:
+    """¿osTicket aceptará los adjuntos que le mande la API?
+
+    Vale la pena comprobarlo porque el fallo es SILENCIOSO: en
+    upload/include/api.tickets.php:85, si el campo "message" del formulario
+    de tickets no tiene adjuntos habilitados, osTicket hace
+    `$data['attachments'] = array()` y sigue adelante. El ticket se crea con
+    201, la API lo da por bueno y las imágenes simplemente no están en
+    ninguna parte. Nadie se entera hasta que un agente abre el ticket.
+
+    El valor sale de ost_config.allow_attachments, que es el que usa por
+    defecto ese campo del formulario (class.forms.php: 'default' =>
+    $cfg->allowAttachments()). Si la fila no existe, osTicket lo toma como
+    desactivado.
+    """
+    valor = conexion.execute(
+        text(f"""
+            SELECT value FROM {P}config
+            WHERE namespace = 'core' AND `key` = 'allow_attachments'
+            LIMIT 1
+        """)
+    ).scalar()
+    return str(valor or "0").strip() not in ("", "0")
+
+
 def listar_temas(conexion: Connection) -> List[Dict[str, Any]]:
     filas = conexion.execute(
         text(f"""
