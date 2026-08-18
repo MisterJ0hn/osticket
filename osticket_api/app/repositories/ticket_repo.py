@@ -338,7 +338,7 @@ def listar_estados(conexion: Connection) -> List[Dict[str, Any]]:
         text(f"""
             SELECT id, name AS nombre, state
             FROM {P}ticket_status
-            WHERE state <> 'deleted'
+            WHERE state <> 'deleted' and flags <> 0
             ORDER BY sort, id
         """)
     ).all()
