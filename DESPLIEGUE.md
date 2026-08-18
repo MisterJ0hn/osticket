@@ -13,7 +13,9 @@ por `host.docker.internal`, que resuelve gracias al `extra_hosts: host-gateway`.
 
 Red del compose: `172.28.0.0/24` — gateway `172.28.0.1` (el host),
 osTicket `172.28.0.10`, API `172.28.0.20`. La subred es fija a propósito:
-el `GRANT` de MySQL y la IP autorizada de la API Key dependen de ella.
+el `GRANT` de MySQL y la IP autorizada de la API Key dependen de ella. Se
+cambia desde el `.env` (`RED_SUBNET`, `RED_IP_OSTICKET`, `RED_IP_API`) si
+choca con otra red del servidor.
 
 ---
 
@@ -274,10 +276,41 @@ Conecta, pero a una base sin las tablas `ost_*` o con otro prefijo. Revisar
 proxy delante, además hay que llenar `TRUSTED_PROXIES` con la IP del proxy, o la
 allowlist ve la del proxy y no la del cliente.
 
-**Conflicto de subred `172.28.0.0/24`**
-Si ya está en uso en el servidor, cambiarla en `docker-compose.yml` (bloque
-`networks.soporte.ipam`) y actualizar en consecuencia el `GRANT` de MySQL y la
-IP de la API Key.
+**`Pool overlaps with other one on this address space`**
+La subred `172.28.0.0/24` choca con otra red que ya existe en el servidor.
+Ver cuáles están ocupadas:
+
+```bash
+docker network inspect $(docker network ls -q)   --format '{{.Name}}: {{range .IPAM.Config}}{{.Subnet}} {{end}}'
+```
+
+Dos salidas posibles:
+
+1. **La red es de un intento anterior de este mismo proyecto** (aparece como
+   `osticket_soporte`, `codi-soporte_soporte` o similar, sin contenedores
+   conectados). Se borra y listo:
+   ```bash
+   docker network rm osticket_soporte
+   docker network prune          # borra todas las redes sin usar
+   ```
+
+2. **La usa otro proyecto.** Elegir un `/24` libre y ponerlo en el `.env`:
+   ```ini
+   RED_SUBNET=172.29.0.0/24
+   RED_IP_OSTICKET=172.29.0.10
+   RED_IP_API=172.29.0.20
+   ```
+   Al cambiar el rango hay que actualizar **también** las dos cosas que
+   dependen de él, o osTicket deja de conectar y la creación de tickets cae al
+   fallback SQL:
+   - el `GRANT` de MySQL (punto 1.2): `'usuario'@'172.29.0.%'`
+   - la IP de la API Key de osTicket (punto 3.5): el gateway, `172.29.0.1`
+   - y la regla de `ufw` del punto 1.3
+
+**La red se llama `osticket_soporte` y no `codi-soporte_soporte`**
+Falta `COMPOSE_PROJECT_NAME=codi-soporte` en el `.env`: sin esa variable
+Compose usa el nombre del directorio. Pasa si el `.env` se copió de una versión
+anterior del `.env.example`. Agregarla y volver a levantar.
 
 ---
 

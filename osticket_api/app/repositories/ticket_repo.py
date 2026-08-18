@@ -326,7 +326,7 @@ def listar_temas(conexion: Connection) -> List[Dict[str, Any]]:
         text(f"""
             SELECT topic_id AS id, topic AS nombre
             FROM {P}help_topic
-            WHERE ispublic = 1
+            WHERE ispublic = 1 and flags <> 0
             ORDER BY sort, topic
         """)
     ).all()
@@ -338,7 +338,7 @@ def listar_estados(conexion: Connection) -> List[Dict[str, Any]]:
         text(f"""
             SELECT id, name AS nombre, state
             FROM {P}ticket_status
-            WHERE state <> 'deleted' and flags <> 0
+            WHERE state <> 'deleted' 
             ORDER BY sort, id
         """)
     ).all()

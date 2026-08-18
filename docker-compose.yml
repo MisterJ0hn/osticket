@@ -64,7 +64,7 @@ services:
       - "host.docker.internal:host-gateway"
     networks:
       soporte:
-        ipv4_address: 172.28.0.10
+        ipv4_address: ${RED_IP_OSTICKET:-172.28.0.10}
     healthcheck:
       # Solo comprueba que Apache atiende. A propósito no toca la aplicación:
       # si la base está caída se quiere ver el error de osTicket en el
@@ -124,7 +124,7 @@ services:
         condition: service_started
     networks:
       soporte:
-        ipv4_address: 172.28.0.20
+        ipv4_address: ${RED_IP_API:-172.28.0.20}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/salud')"]
       interval: 30s
@@ -144,8 +144,13 @@ networks:
       config:
         # Subred fija a propósito: da un rango estable para el GRANT de MySQL
         # y hace predecible la IP de origen que verá osTicket al validar la
-        # API Key. El gateway (172.28.0.1) es el host Linux.
-        - subnet: 172.28.0.0/24
+        # API Key. El gateway (.1) es el host Linux.
+        #
+        # Se cambia desde el .env (RED_SUBNET / RED_IP_*) si choca con otra
+        # red del servidor: "Pool overlaps with other one on this address
+        # space". Al cambiarla hay que actualizar también el GRANT de MySQL y
+        # la IP autorizada de la API Key de osTicket.
+        - subnet: ${RED_SUBNET:-172.28.0.0/24}
 
 volumes:
   osticket_attachments:
