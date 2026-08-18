@@ -166,7 +166,49 @@ curl -H "X-API-Key: tu-clave" "http://SERVIDOR:7091/api/v1/tickets?email=alguien
 
 Documentación interactiva en `http://SERVIDOR:7091/docs`.
 
-### 3.5 Creación de ticket — el paso que suele fallar
+### 3.5 Clientes de la API
+
+Cada consumidor tiene su propia clave y solo ve los tickets de **su
+organización de osTicket**. Antes del primer uso:
+
+```bash
+# 1. Crear la tabla de clientes, una sola vez
+mysql -u root -p codi_soporte < osticket_api/sql/001_api_cliente.sql
+
+# 2. Cada cliente necesita una organización en osTicket
+#    (Panel Admin -> Users -> Organizations). Anotar su id.
+mysql -u root -p -e "SELECT id, name FROM codi_soporte.ost_organization;"
+
+# 3. Alta del cliente. La clave se muestra UNA sola vez.
+docker compose exec api python -m scripts.gestionar_clientes   alta --nombre intranet --org-id 2
+
+docker compose exec api python -m scripts.gestionar_clientes listar
+```
+
+Baja o rotación surten efecto en ≤60s **sin reiniciar nada** (`CACHE_CLIENTES_TTL`):
+
+```bash
+docker compose exec api python -m scripts.gestionar_clientes baja --nombre intranet
+docker compose exec api python -m scripts.gestionar_clientes rotar --nombre intranet
+```
+
+**Antes de repartir claves**, revisar cómo están asignados los usuarios: los
+que estén sin organización no los verá ningún cliente con aislamiento.
+
+```sql
+SELECT org_id, COUNT(*) FROM codi_soporte.ost_user GROUP BY org_id;
+```
+
+Comprobar el aislamiento con dos claves de organizaciones distintas:
+
+```bash
+# La propia: 200 con datos
+curl -H "X-API-Key: $CLAVE_A" "http://SERVIDOR:7091/api/v1/tickets?email=alguien@empresa-a.cl"
+# La ajena: 404, igual que un email inexistente
+curl -H "X-API-Key: $CLAVE_B" "http://SERVIDOR:7091/api/v1/tickets?email=alguien@empresa-a.cl"
+```
+
+### 3.6 Creación de ticket — el paso que suele fallar
 
 osTicket valida la API Key contra la **IP de origen exacta** (`ost_api_key.ipaddr`).
 Como la API llama por la URL pública, el tráfico sale del contenedor, entra por
@@ -188,7 +230,7 @@ docker compose logs osticket | grep "api/http.php" | tail -5
 mysql -u root -p -e "UPDATE codi_soporte.ost_api_key SET ipaddr='172.28.0.1' WHERE apikey='LA-KEY';"
 ```
 
-### 3.6 Persistencia de adjuntos
+### 3.7 Persistencia de adjuntos
 
 ```bash
 docker compose restart osticket
@@ -271,6 +313,38 @@ poner `DB_HOST=172.28.0.1` en el `.env` (el gateway de la red es el host).
 Conecta, pero a una base sin las tablas `ost_*` o con otro prefijo. Revisar
 `DB_NAME` y `DB_TABLE_PREFIX`.
 
+**Los tickets se crean "en modo degradado" y se pierden los adjuntos**
+La API nativa falló y entró el fallback SQL, que no guarda adjuntos. Desde la
+respuesta ya se ve la causa (`mensaje` lleva el motivo); en el log está completa:
+
+```bash
+docker compose logs api | grep "API nativa no disponible"
+```
+
+Según lo que diga esa línea:
+
+| En el log | Qué pasa | Arreglo |
+|---|---|---|
+| `HTTP 401` / `HTTP 403` | La API Key de osTicket no está autorizada para la IP desde la que llama el contenedor. **Pasa con TODOS los tickets**, no solo con los que traen imágenes: solo se nota con adjuntos porque es cuando se pierde algo | Punto 3.6 |
+| `Fatal error` / `memory` / `HTTP 500` | PHP se quedó sin memoria decodificando los adjuntos | Ya cubierto: `memory_limit = 512M` en `docker/php.ini`. Reconstruir: `docker compose up -d --build osticket` |
+| `timeout` / `ReadTimeout` | osTicket tardó más que el timeout | Subir `OSTICKET_TIMEOUT_ADJUNTOS` en el `.env` |
+| `No se pudo contactar` | `OSTICKET_URL` mal puesta o inalcanzable desde el contenedor | Probar: `docker compose exec api python -c "import httpx;print(httpx.get('URL').status_code)"` |
+
+**Un cliente crea un ticket y después no lo ve en sus listados**
+El usuario quedó sin organización (`org_id = 0`) y las lecturas filtran por
+ella. La API lo asigna sola al crear, así que si pasa, revisar el log de la
+API por "no se pudo asignar". Se corrige a mano:
+
+```sql
+UPDATE codi_soporte.ost_user u
+JOIN codi_soporte.ost_user_email ue ON ue.user_id = u.id
+SET u.org_id = 2 WHERE ue.address = 'nuevo@empresa-a.cl' AND u.org_id = 0;
+```
+
+**Todas las peticiones devuelven 403 tras dar de alta clientes**
+Ver el arranque de la API (`docker compose logs api`): distingue "falta la
+tabla api_cliente" de "no hay ningún cliente activo".
+
 **La API devuelve 403 con la clave correcta**
 `IPS_PERMITIDAS` está filtrando. Vaciarla o agregar la IP del cliente. Si hay un
 proxy delante, además hay que llenar `TRUSTED_PROXIES` con la IP del proxy, o la
@@ -322,5 +396,7 @@ anterior del `.env.example`. Agregarla y volver a levantar.
 | `.env.example` | Plantilla de configuración; se copia a `.env` (que no se versiona) |
 | `osTicket/docker/ost-config.docker.php` | Config de osTicket que lee las credenciales del entorno |
 | `osTicket/docker/apache-env.conf` | `PassEnv` para que esas variables lleguen a PHP |
+| `osticket_api/sql/001_api_cliente.sql` | Tabla de clientes de la API (correr una vez) |
+| `osticket_api/scripts/gestionar_clientes.py` | Alta, baja, rotación y listado de clientes |
 | `osTicket/docker-compose.yml` | Anterior, solo osTicket. Se deja intacto |
 | `osTicket/docker-compose.local.yml` | Pruebas locales contra XAMPP. Se deja intacto |

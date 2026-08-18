@@ -2,7 +2,9 @@ from datetime import date, datetime
 from enum import Enum
 from typing import List, Optional
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, model_validator
+
+from app.core.config import settings
 
 # Los nombres de campo van en español de cara al consumidor; la traducción
 # desde las columnas inglesas de osTicket se hace en el repositorio.
@@ -32,6 +34,18 @@ class Adjunto(BaseModel):
     contenido_base64: str = Field(..., description="Contenido del archivo en base64")
     tipo_mime: str = Field("application/octet-stream", max_length=127)
 
+    @property
+    def tamano_bytes(self) -> int:
+        """Tamaño del archivo ya decodificado, estimado desde el base64.
+
+        No se decodifica para medirlo: eso duplicaría en memoria cada adjunto
+        solo para validarlo. base64 son 4 caracteres por cada 3 bytes, menos
+        el relleno final.
+        """
+        largo = len(self.contenido_base64.strip())
+        relleno = self.contenido_base64.strip().count("=", -2)
+        return max(0, (largo * 3) // 4 - relleno)
+
 
 class CrearTicketRequest(BaseModel):
     email: EmailStr = Field(..., description="Email del usuario dueño del ticket")
@@ -57,6 +71,30 @@ class CrearTicketRequest(BaseModel):
     auto_responder: bool = Field(
         True, description="Enviar la auto-respuesta al usuario"
     )
+
+    @model_validator(mode="after")
+    def _validar_tamano_de_adjuntos(self) -> "CrearTicketRequest":
+        """Rechaza de entrada los adjuntos que no van a caber.
+
+        Sin esto, un envío demasiado grande no falla acá sino más adelante y
+        de forma opaca: PHP corta el cuerpo o se queda sin memoria, osTicket
+        contesta un 500 sin explicación, y la API lo lee como "el helpdesk
+        está caído" y cae al fallback SQL... que descarta los adjuntos. El
+        consumidor recibe un ticket creado a medias en vez de un error que
+        le diga qué arreglar.
+        """
+        if not self.adjuntos:
+            return self
+
+        maximo = settings.ADJUNTOS_MAX_MB * 1024 * 1024
+        total = sum(adjunto.tamano_bytes for adjunto in self.adjuntos)
+        if total > maximo:
+            raise ValueError(
+                f"Los adjuntos suman {total / 1048576:.1f} MB y el máximo es "
+                f"{settings.ADJUNTOS_MAX_MB} MB. Enviar menos archivos, o "
+                f"comprimir las imágenes antes de adjuntarlas."
+            )
+        return self
 
 
 class OrigenCreacion(str, Enum):

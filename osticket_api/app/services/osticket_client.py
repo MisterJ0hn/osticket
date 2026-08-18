@@ -117,10 +117,16 @@ def crear_ticket(payload: Dict[str, Any]) -> str:
         "Expect": "",
     }
 
+    # Con adjuntos se usa un timeout mucho más largo. No es solo para no
+    # fallar de más: si rendimos antes que osTicket, él sigue procesando y
+    # puede acabar creando el ticket mientras nosotros ya lo dimos por
+    # perdido y lo creamos otra vez por SQL. El resultado sería dos tickets
+    # para la misma solicitud, y el duplicado no lo detecta nadie.
+    timeout = (settings.OSTICKET_TIMEOUT_ADJUNTOS if payload.get("attachments")
+               else settings.OSTICKET_TIMEOUT)
+
     try:
-        respuesta = httpx.post(
-            url, json=payload, headers=cabeceras, timeout=settings.OSTICKET_TIMEOUT
-        )
+        respuesta = httpx.post(url, json=payload, headers=cabeceras, timeout=timeout)
     except httpx.HTTPError as exc:
         raise OsticketApiError(
             f"No se pudo contactar la API de osTicket en {url}: {exc}",

@@ -4,16 +4,20 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.engine import Connection
 
 from app.core.database import obtener_conexion
-from app.core.security import verificar_acceso
+from app.core.security import PERMISO_LEER, exigir
 from app.schemas.ticket import ItemCatalogo
 from app.services import ticket_service
 
 # Los ids de tema, estado y prioridad son configurables en cada helpdesk.
 # Publicarlos evita que el consumidor los tenga que adivinar o hardcodear.
-# La autenticación va a nivel de router para que se resuelva antes de pedir
-# conexión al pool (ver el comentario equivalente en tickets.py).
+#
+# Acá la autenticación sí va a nivel de router (en tickets.py bajó a cada
+# ruta): son tres rutas con el mismo permiso. Y no llevan filtro por
+# organización a propósito: temas, estados y prioridades son configuración
+# global del helpdesk, no datos de un cliente.
 router = APIRouter(
-    prefix="/catalogos", tags=["catálogos"], dependencies=[Depends(verificar_acceso)]
+    prefix="/catalogos", tags=["catálogos"],
+    dependencies=[Depends(exigir(PERMISO_LEER))],
 )
 
 

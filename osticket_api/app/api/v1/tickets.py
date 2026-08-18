@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Path, Query, status
 from sqlalchemy.engine import Connection
 
 from app.core.database import obtener_conexion
-from app.core.security import verificar_acceso
+from app.core.security import PERMISO_CREAR, PERMISO_LEER, PERMISO_NOTAS, ClienteApi, exigir
 from app.schemas.ticket import (
     CrearTicketRequest,
     CrearTicketResponse,
@@ -16,12 +16,12 @@ from app.schemas.ticket import (
 )
 from app.services import ticket_service
 
-# La autenticación va como dependencia del router, no de cada ruta: las
-# dependencias del router se resuelven ANTES que las de la función, así que
-# una petición sin clave se rechaza sin llegar a pedirle una conexión al pool.
-router = APIRouter(
-    prefix="/tickets", tags=["tickets"], dependencies=[Depends(verificar_acceso)]
-)
+# La autenticación ya no va como dependencia del router: cada ruta exige su
+# propio permiso (crear o leer), así que la dependencia es distinta según la
+# operación. Se sigue cumpliendo lo importante: al declararla como parámetro
+# de la función, FastAPI la resuelve ANTES que obtener_conexion, y una
+# petición sin clave se rechaza sin llegar a pedirle una conexión al pool.
+router = APIRouter(prefix="/tickets", tags=["tickets"])
 
 # Las rutas se declaran con `def` y no con `async def` a propósito: por dentro
 # todo es I/O bloqueante (SQLAlchemy y httpx síncronos), así que FastAPI las
@@ -36,9 +36,7 @@ router = APIRouter(
 )
 def crear_ticket(
     datos: CrearTicketRequest,
-    # Ya la resolvió el router; FastAPI cachea la dependencia dentro del
-    # request, así que acá solo se recoge la IP que devuelve.
-    ip_cliente: str = Depends(verificar_acceso),
+    cliente: ClienteApi = Depends(exigir(PERMISO_CREAR)),
 ) -> CrearTicketResponse:
     """Crea un ticket a nombre del usuario indicado por `email`.
 
@@ -47,9 +45,13 @@ def crear_ticket(
     activo, el ticket se inserta directamente en la base y la respuesta lo
     indica en `origen`.
 
-    Si el email no existe en osTicket, el usuario se crea automáticamente.
+    Si el email no existe en osTicket, el usuario se crea automáticamente y
+    queda asignado a la organización del cliente que llama, para que después
+    pueda leer el ticket que acaba de crear.
     """
-    resultado = ticket_service.crear_ticket(datos, ip_origen=ip_cliente)
+    resultado = ticket_service.crear_ticket(
+        datos, ip_origen=cliente.ip, org_id=cliente.org_id
+    )
     return CrearTicketResponse(**resultado)
 
 
@@ -73,12 +75,18 @@ def listar_tickets(
     hasta: Optional[date] = Query(None, description="Creados hasta esta fecha (incluida)"),
     pagina: int = Query(1, ge=1),
     tamano: int = Query(25, ge=1, le=200),
+    cliente: ClienteApi = Depends(exigir(PERMISO_LEER)),
     conexion: Connection = Depends(obtener_conexion),
 ) ->ListaTicketsResponse:
-    """Tickets creados por el usuario, del más nuevo al más antiguo."""
+    """Tickets creados por el usuario, del más nuevo al más antiguo.
+
+    Solo los de la organización del cliente que llama. Un email de otra
+    organización responde igual que uno que no existe.
+    """
     resultado = ticket_service.listar_tickets(
         conexion,
         email=email,
+        org_id=cliente.org_id,
         estado=estado,
         estado_nombre=estado_nombre,
         desde=desde,
@@ -99,12 +107,22 @@ def detalle_ticket(
     incluir_notas: bool = Query(
         False,
         description="Incluir las notas internas de los agentes. No son visibles "
-                    "para el cliente en el portal: activarlo solo para consumidores internos",
+                    "para el cliente en el portal, así que solo tiene efecto si "
+                    "la clave tiene el permiso 'notas'; sin él se ignora",
     ),
+    cliente: ClienteApi = Depends(exigir(PERMISO_LEER)),
     conexion: Connection = Depends(obtener_conexion),
 ) ->TicketDetalle:
     """Cabecera del ticket más el hilo completo de mensajes y respuestas."""
-    return TicketDetalle(**ticket_service.obtener_detalle(conexion, numero, incluir_notas))
+    # Las notas internas son comentarios que los agentes escriben dando por
+    # hecho que el cliente no los lee. El filtro por organización no basta
+    # acá: son datos de la propia organización, pero igual no le corresponden
+    # a un consumidor externo. Se ignora el parámetro en vez de devolver
+    # error: quien no tiene el permiso no tiene por qué saber que existe.
+    notas = incluir_notas and cliente.puede(PERMISO_NOTAS)
+    return TicketDetalle(**ticket_service.obtener_detalle(
+        conexion, numero, notas, org_id=cliente.org_id
+    ))
 
 
 @router.get(
@@ -114,6 +132,7 @@ def detalle_ticket(
 )
 def estado_ticket(
     numero: str = Path(..., description="Número del ticket"),
+    cliente: ClienteApi = Depends(exigir(PERMISO_LEER)),
     conexion: Connection = Depends(obtener_conexion),
 ) ->EstadoTicketResponse:
     """Consulta liviana de estado, pensada para polling.
@@ -121,4 +140,6 @@ def estado_ticket(
     `abierto` sale de `ost_ticket_status.state == 'open'` y no del id del
     estado, porque los estados son configurables en osTicket.
     """
-    return EstadoTicketResponse(**ticket_service.obtener_estado(conexion, numero))
+    return EstadoTicketResponse(
+        **ticket_service.obtener_estado(conexion, numero, org_id=cliente.org_id)
+    )

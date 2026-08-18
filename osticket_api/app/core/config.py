@@ -47,10 +47,28 @@ class Settings(BaseSettings):
     OSTICKET_URL: str = "http://localhost:8080"
     OSTICKET_API_KEY: str = ""
     OSTICKET_TIMEOUT: float = 15.0
+    # Timeout aparte para las peticiones CON adjuntos: subir varios MB y que
+    # osTicket los decodifique y los escriba en la base no entra en 15s.
+    #
+    # Tiene que ser >= al max_execution_time de PHP (120s en docker/php.ini).
+    # Si rendimos antes que osTicket, él sigue procesando y puede terminar
+    # creando el ticket mientras nosotros ya lo dimos por perdido y lo
+    # creamos de nuevo por SQL: dos tickets para la misma solicitud.
+    OSTICKET_TIMEOUT_ADJUNTOS: float = 120.0
+    # Tamaño máximo del conjunto de adjuntos de un ticket, ya decodificados.
+    # Por debajo del max_file_size de osTicket (32 MB) para poder rechazarlo
+    # con un mensaje claro en vez de que reviente más adelante.
+    ADJUNTOS_MAX_MB: int = 25
     OSTICKET_FALLBACK_SQL: bool = True
 
     # ── Seguridad de este servicio ──
+    # Claves anónimas heredadas: ven TODO el helpdesk, sin filtro de
+    # organización. Se mantienen solo para migrar; lo nuevo va en la tabla
+    # api_cliente. Ver app/core/security.py.
     API_KEYS: str = ""
+    # Cada cuánto se relee api_cliente. Marca el retardo con el que una baja
+    # (activo = 0) surte efecto: bajarlo cuesta una consulta más seguido.
+    CACHE_CLIENTES_TTL: int = 60
     IPS_PERMITIDAS: str = ""
     TRUSTED_PROXIES: str = ""
     CORS_ORIGINS: str = "*"

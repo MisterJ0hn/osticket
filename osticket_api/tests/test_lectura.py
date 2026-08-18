@@ -40,7 +40,7 @@ def repo(monkeypatch):
 
 
 def test_listar_tickets_del_usuario(cliente, repo):
-    repo.buscar_usuario_por_email = lambda conexion, email: USUARIO
+    repo.buscar_usuario_por_email = lambda conexion, email, **kw: USUARIO
     repo.listar_tickets_de_usuario = lambda conexion, **kw: (1, [TICKET])
 
     respuesta = cliente.get(
@@ -61,7 +61,7 @@ def test_listar_filtra_por_estado_abiertos_por_defecto(cliente, repo):
         recibido.update(kw)
         return 0, []
 
-    repo.buscar_usuario_por_email = lambda conexion, email: USUARIO
+    repo.buscar_usuario_por_email = lambda conexion, email, **kw: USUARIO
     repo.listar_tickets_de_usuario = espia
 
     cliente.get("/api/v1/tickets?email=cliente@ejemplo.cl", headers=CABECERAS)
@@ -70,7 +70,7 @@ def test_listar_filtra_por_estado_abiertos_por_defecto(cliente, repo):
 
 
 def test_usuario_inexistente_devuelve_404(cliente, repo):
-    repo.buscar_usuario_por_email = lambda conexion, email: None
+    repo.buscar_usuario_por_email = lambda conexion, email, **kw: None
 
     respuesta = cliente.get("/api/v1/tickets?email=nadie@ejemplo.cl", headers=CABECERAS)
     assert respuesta.status_code == 404
@@ -80,7 +80,7 @@ def test_usuario_inexistente_devuelve_404(cliente, repo):
 def test_detalle_incluye_el_hilo(cliente, repo):
     detalle = {**TICKET, "fuente": "API", "ip_origen": "127.0.0.1",
                "ultima_respuesta": None, "ultimo_mensaje": None, "_thread_id": 3}
-    repo.obtener_ticket = lambda conexion, numero: dict(detalle)
+    repo.obtener_ticket = lambda conexion, numero, **kw: dict(detalle)
     repo.obtener_hilo = lambda conexion, thread_id, incluir_notas: [
         {"id": 1, "tipo": "mensaje", "autor": "Cliente Prueba", "titulo": "No puedo entrar",
          "cuerpo": "Me dice contraseña incorrecta", "formato": "text",
@@ -96,14 +96,14 @@ def test_detalle_incluye_el_hilo(cliente, repo):
 
 
 def test_detalle_de_ticket_inexistente_devuelve_404(cliente, repo):
-    repo.obtener_ticket = lambda conexion, numero: None
+    repo.obtener_ticket = lambda conexion, numero, **kw: None
 
     respuesta = cliente.get("/api/v1/tickets/000000", headers=CABECERAS)
     assert respuesta.status_code == 404
 
 
 def test_estado_de_ticket(cliente, repo):
-    repo.obtener_estado = lambda conexion, numero: {
+    repo.obtener_estado = lambda conexion, numero, **kw: {
         "numero": "483920", "estado": "Closed", "state": "closed", "abierto": False,
         "agente_asignado": None, "creado": datetime(2026, 8, 1, 10, 0),
         "actualizado": None, "cerrado": datetime(2026, 8, 3, 12, 0),

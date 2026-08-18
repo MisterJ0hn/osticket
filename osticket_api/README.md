@@ -27,6 +27,9 @@ resuelve eso combinando los dos caminos:
 
 Todos bajo `/api/v1` y protegidos por `X-API-Key` + allowlist de IP.
 
+Cada consumidor tiene su propia clave, y **solo ve los tickets de su
+organización de osTicket**: ver *Clientes de la API*.
+
 | Método | Ruta | Qué hace |
 |---|---|---|
 | `POST` | `/api/v1/tickets` | Crear ticket |
@@ -117,9 +120,74 @@ Ver `.env.example`. Las que más importan:
 | `OSTICKET_URL` | Base de la instalación, sin barra final (ej. `http://localhost:8080`) |
 | `OSTICKET_API_KEY` | La clave del paso anterior |
 | `OSTICKET_FALLBACK_SQL` | `false` para fallar en vez de insertar directo en MySQL |
-| `API_KEYS` | Claves válidas para el header `X-API-Key`, separadas por coma |
+| `OSTICKET_TIMEOUT_ADJUNTOS` | Timeout para peticiones con adjuntos (120s). Debe ser >= al `max_execution_time` de PHP |
+| `ADJUNTOS_MAX_MB` | Tope del conjunto de adjuntos de un ticket (25 MB) |
+| `API_KEYS` | **Heredado.** Claves anónimas que ven TODO el helpdesk. Lo nuevo va en la tabla `api_cliente` (ver *Clientes de la API*) |
+| `CACHE_CLIENTES_TTL` | Cada cuántos segundos se relee `api_cliente`. Marca el retardo con el que surte efecto una baja (60 por defecto) |
 | `IPS_PERMITIDAS` | IPs/CIDR autorizados. **Vacío = sin filtro por IP** |
 | `TRUSTED_PROXIES` | Solo desde estas IPs se hace caso a `X-Forwarded-For` |
+
+## Clientes de la API
+
+Cada consumidor se da de alta en la tabla `api_cliente` con su propia clave y
+su organización. La organización es lo que delimita sus datos: un cliente solo
+ve los tickets de usuarios que pertenecen a ella (`ost_user.org_id`).
+
+### Puesta en marcha
+
+```bash
+# 1. Crear la tabla, una sola vez
+mysql -u USUARIO -p BASE < sql/001_api_cliente.sql
+
+# 2. Dar de alta cada cliente. La clave se muestra UNA vez.
+python -m scripts.gestionar_clientes alta --nombre intranet --org-id 2
+
+# En el despliegue con Docker:
+docker compose exec api python -m scripts.gestionar_clientes listar
+```
+
+| Comando | Qué hace |
+|---|---|
+| `alta --nombre X --org-id N` | Crea el cliente y genera su clave |
+| `listar` | Todos los clientes, con su organización y último uso |
+| `rotar --nombre X` | Clave nueva; la anterior deja de servir |
+| `baja --nombre X` | Revoca el acceso (`activo = 0`), sin borrar la fila |
+
+Los cambios surten efecto en ≤ `CACHE_CLIENTES_TTL` segundos, **sin reiniciar
+el servicio**: la caché de claves se refresca sola.
+
+### Organización: el detalle que hay que tener presente
+
+`org_id = 0` significa **cliente interno**: ve todos los tickets, sin
+aislamiento. Es la única forma de saltárselo, y el script pide confirmarlo.
+
+Al crear un ticket para un email que osTicket no conoce, el usuario nuevo
+**queda asignado a la organización del cliente que lo pidió**. Sin ese paso el
+usuario quedaría en `org_id = 0` (que es lo que hace osTicket por su cuenta) y
+el cliente no podría leer después el ticket que acaba de crear.
+
+Si el email ya pertenece a otra organización, la creación se rechaza con 400:
+dejarla pasar crearía un ticket que el cliente que lo pidió no puede leer y que
+sí ve otro cliente.
+
+### Permisos
+
+| Permiso | Habilita |
+|---|---|
+| `crear` | `POST /tickets` |
+| `leer` | Los `GET` de tickets y catálogos |
+| `notas` | Que `incluir_notas=true` devuelva las notas internas de los agentes |
+
+`notas` va **solo a consumidores internos**. Son comentarios que los agentes
+escriben dando por hecho que el cliente no los lee, y el filtro por
+organización no los cubre: son datos de la propia organización. Sin el
+permiso, el parámetro se ignora en silencio.
+
+### Migrar desde `API_KEYS`
+
+Las claves que estén en `API_KEYS` siguen funcionando como clientes internos
+(ven todo, como antes) y el arranque avisa de cada una. Una vez dadas de alta
+en `api_cliente`, se vacía la variable y se recrea el contenedor.
 
 ## Sobre el fallback SQL
 

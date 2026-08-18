@@ -130,12 +130,17 @@ def _generar_numero(conexion: Connection, formato_topic: Optional[str] = None) -
 
 
 def _resolver_usuario(conexion: Connection, email: str, nombre: Optional[str],
-                      telefono: Optional[str]) -> Tuple[int, int]:
+                      telefono: Optional[str], org_id: int = 0) -> Tuple[int, int]:
     """Devuelve (user_id, user_email_id), creando el usuario si no existe.
 
     La auto-creación es el mismo comportamiento que tiene la API nativa: si
     el email no está registrado, osTicket da de alta al usuario con el nombre
     recibido.
+
+    El usuario nuevo se crea con `org_id`, no con 0. Es el detalle del que
+    depende que el cliente pueda leer después el ticket que acaba de crear:
+    las consultas filtran por ost_user.org_id, así que un usuario sin
+    organización queda invisible para todos los clientes con aislamiento.
     """
     fila = conexion.execute(
         text(f"SELECT id, user_id FROM {P}user_email WHERE address = :email LIMIT 1"),
@@ -149,9 +154,9 @@ def _resolver_usuario(conexion: Connection, email: str, nombre: Optional[str],
     user_id = conexion.execute(
         text(f"""
             INSERT INTO {P}user (org_id, default_email_id, status, name, created, updated)
-            VALUES (0, 0, 0, :nombre, NOW(), NOW())
+            VALUES (:org_id, 0, 0, :nombre, NOW(), NOW())
         """),
-        {"nombre": nombre_usuario},
+        {"nombre": nombre_usuario, "org_id": org_id},
     ).lastrowid
 
     email_id = conexion.execute(
@@ -174,8 +179,58 @@ def _resolver_usuario(conexion: Connection, email: str, nombre: Optional[str],
         {"uid": user_id, "email": email, "nombre": nombre_usuario, "telefono": telefono},
     )
 
-    logger.info("Usuario creado por fallback SQL: %s (id=%s)", email, user_id)
+    logger.info("Usuario creado por fallback SQL: %s (id=%s, org_id=%s)",
+                email, user_id, org_id)
     return user_id, email_id
+
+
+def organizacion_del_email(conexion: Connection, email: str) -> Optional[int]:
+    """org_id del usuario dueño de ese email, o None si el email no existe.
+
+    Sirve para detectar antes de crear un ticket que el email ya pertenece a
+    otra organización.
+    """
+    fila = conexion.execute(
+        text(f"""
+            SELECT u.org_id
+            FROM {P}user_email ue
+            JOIN {P}user u ON u.id = ue.user_id
+            WHERE ue.address = :email
+            LIMIT 1
+        """),
+        {"email": email},
+    ).first()
+    return None if fila is None else int(fila.org_id)
+
+
+def asignar_organizacion(conexion: Connection, email: str, org_id: int) -> bool:
+    """Pone la organización al usuario de ese email, si no tenía ninguna.
+
+    Existe por la API nativa de osTicket: cuando el email no está registrado,
+    osTicket crea el usuario por su cuenta y lo deja en org_id = 0 (salvo que
+    ost_organization.domain calce con el dominio del correo). Sin este paso,
+    el cliente crea el ticket correctamente y después no lo ve, porque las
+    consultas filtran por organización.
+
+    Solo toca a los que están en 0: nunca mueve un usuario de una
+    organización a otra. Devuelve True si actualizó algo.
+    """
+    if not org_id:
+        return False
+
+    resultado = conexion.execute(
+        text(f"""
+            UPDATE {P}user u
+            JOIN {P}user_email ue ON ue.user_id = u.id
+            SET u.org_id = :org_id, u.updated = NOW()
+            WHERE ue.address = :email AND u.org_id = 0
+        """),
+        {"org_id": org_id, "email": email},
+    )
+    if resultado.rowcount:
+        logger.info("Usuario %s asignado a la organización %s", email, org_id)
+        return True
+    return False
 
 
 def _datos_del_topic(conexion: Connection, topic_id: Optional[int]) -> Dict[str, Any]:
@@ -224,6 +279,7 @@ def crear_ticket(
     topic_id: Optional[int] = None,
     prioridad_id: Optional[int] = None,
     ip_origen: str = "",
+    org_id: int = 0,
 ) -> Dict[str, Any]:
     """Inserta el ticket completo. Debe ejecutarse dentro de una transacción.
 
@@ -233,7 +289,7 @@ def crear_ticket(
     en hora local. Mezclarlos deja los tickets del fallback desfasados varias
     horas respecto de los que crea osTicket.
     """
-    user_id, user_email_id = _resolver_usuario(conexion, email, nombre, telefono)
+    user_id, user_email_id = _resolver_usuario(conexion, email, nombre, telefono, org_id)
     topic = _datos_del_topic(conexion, topic_id)
 
     dept_id = _entero(topic.get("dept_id")) or _entero(_config(conexion, "default_dept_id", "1")) or 1

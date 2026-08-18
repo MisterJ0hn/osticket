@@ -21,10 +21,12 @@ async def lifespan(app: FastAPI):
     Se registra como error/warning en vez de abortar: en producción es peor
     que el servicio no levante a que levante quejándose.
     """
-    if not settings.api_keys:
-        logger.error(
-            "API_KEYS está vacío: la API rechazará todas las peticiones. "
-            "Configurar al menos una clave en el .env."
+    if settings.api_keys:
+        logger.warning(
+            "API_KEYS tiene %s clave(s) heredadas: son anónimas y ven TODOS "
+            "los tickets, sin filtro de organización. Migrarlas a la tabla "
+            "api_cliente (scripts/gestionar_clientes.py) y vaciar la variable.",
+            len(settings.api_keys),
         )
     if not settings.ips_permitidas:
         logger.warning("IPS_PERMITIDAS está vacío: no se filtra por IP de origen.")
@@ -40,7 +42,42 @@ async def lifespan(app: FastAPI):
         )
     elif (problema := verificar_esquema()):
         logger.error("Base mal configurada: %s", problema)
+    else:
+        _avisar_de_clientes()
     yield
+
+
+def _avisar_de_clientes() -> None:
+    """Distingue los dos motivos por los que nadie podría autenticarse.
+
+    Sin esto, tanto olvidar el DDL como no haber dado de alta a nadie se
+    manifiestan igual: un 403 en todas las peticiones, que es un síntoma que
+    no apunta a ninguna de las dos causas.
+    """
+    from app.core import database
+    from app.repositories import cliente_repo
+
+    try:
+        with database.engine.connect() as conexion:
+            if not cliente_repo.tabla_existe(conexion):
+                logger.error(
+                    "Falta la tabla api_cliente: correr sql/001_api_cliente.sql. "
+                    "Sin ella no hay más claves que las heredadas de API_KEYS."
+                )
+                return
+            activos = len(cliente_repo.listar_activos(conexion))
+    except Exception:
+        logger.exception("No se pudo revisar la tabla api_cliente")
+        return
+
+    if not activos and not settings.api_keys:
+        logger.error(
+            "No hay ningún cliente activo en api_cliente ni claves en "
+            "API_KEYS: la API rechazará todas las peticiones."
+        )
+    else:
+        logger.info("Clientes activos en api_cliente: %s (la caché se refresca "
+                    "cada %ss)", activos, settings.CACHE_CLIENTES_TTL)
 
 
 app = FastAPI(

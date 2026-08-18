@@ -16,6 +16,10 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.engine import Connection
 
 from app.core.config import settings
+# ORG_TODAS se define en core.security, que es donde vive el concepto de
+# cliente: duplicar la constante acá dejaría dos verdades que mantener en
+# sincronía para un límite de seguridad.
+from app.core.security import ORG_TODAS
 from app.schemas.ticket import FiltroEstado
 
 P = settings.prefijo
@@ -71,6 +75,20 @@ _SELECT_TICKET = f"""
 # ni en el portal del cliente: exponerlos por la API sería incoherente.
 _EXCLUIR_BORRADOS = "COALESCE(s.state, '') <> 'deleted'"
 
+def _filtro_org(org_id: int, alias: str = "u"):
+    """Condición y parámetro que limitan una consulta a una organización.
+
+    Devuelve (condiciones, params) para mezclar con el resto del WHERE. Con
+    ORG_TODAS no filtra nada: es el caso del consumidor interno.
+
+    Este es el mecanismo de aislamiento entre clientes de la API, así que va
+    en un solo lugar: cada consulta que devuelva tickets tiene que pasar por
+    acá, y una que se olvide de llamarlo se los muestra todos.
+    """
+    if org_id == ORG_TODAS:
+        return [], {}
+    return [f"{alias}.org_id = :org_id"], {"org_id": org_id}
+
 
 def _fila_a_resumen(fila: Any) -> Dict[str, Any]:
     """Traduce una fila de osTicket a la forma que publica la API."""
@@ -99,22 +117,30 @@ def _fila_a_resumen(fila: Any) -> Dict[str, Any]:
     }
 
 
-def buscar_usuario_por_email(conexion: Connection, email: str) -> Optional[Dict[str, Any]]:
+def buscar_usuario_por_email(conexion: Connection, email: str,
+                             org_id: int = ORG_TODAS) -> Optional[Dict[str, Any]]:
     """Resuelve el usuario dueño de los tickets a partir de su email.
 
     Un usuario de osTicket puede tener varios emails (ost_user_email), así
     que se busca por dirección y se devuelve el user_id, que es el que
     referencia ost_ticket.user_id.
+
+    El filtro de organización va acá dentro y no en el servicio: así un email
+    de otra organización es indistinguible de uno que no existe. Devolverlo y
+    filtrar después confirmaría que esa persona está en el helpdesk.
     """
+    condiciones, params = _filtro_org(org_id)
+    where = " AND ".join(["ue.address = :email", *condiciones])
+
     fila = conexion.execute(
         text(f"""
             SELECT u.id, u.name, ue.address
             FROM {P}user_email ue
             JOIN {P}user u ON u.id = ue.user_id
-            WHERE ue.address = :email
+            WHERE {where}
             LIMIT 1
         """),
-        {"email": email},
+        {"email": email, **params},
     ).first()
     if not fila:
         return None
@@ -149,11 +175,21 @@ def listar_tickets_de_usuario(
     hasta: Optional[date] = None,
     pagina: int = 1,
     tamano: int = 25,
+    org_id: int = ORG_TODAS,
 ) -> Tuple[int, List[Dict[str, Any]]]:
     """Tickets creados por un usuario. Devuelve (total, página de tickets)."""
     condiciones, params = _condiciones_estado(estado, estado_nombre)
     condiciones.append("t.user_id = :user_id")
     params["user_id"] = user_id
+
+    # Redundante con el filtro de buscar_usuario_por_email, que es por donde
+    # se obtiene el user_id: si ese usuario no fuera de la organización, acá
+    # no se habría llegado. Se repite igual porque es un límite de seguridad
+    # y no depende de que quien llame haya resuelto el usuario como
+    # corresponde.
+    cond_org, params_org = _filtro_org(org_id)
+    condiciones.extend(cond_org)
+    params.update(params_org)
 
     if desde:
         condiciones.append("t.created >= :desde")
@@ -171,6 +207,11 @@ def listar_tickets_de_usuario(
             SELECT COUNT(*)
             FROM {P}ticket t
             LEFT JOIN {P}ticket_status s ON s.id = t.status_id
+            -- ost_user no hace falta para contar, pero el WHERE lo comparte
+            -- con la consulta de la página y ese lleva el filtro por
+            -- organización (u.org_id). Sin este join, un cliente con
+            -- aislamiento recibiría "Unknown column 'u.org_id'".
+            LEFT JOIN {P}user u ON u.id = t.user_id
             {where}
         """),
         params,
@@ -187,11 +228,20 @@ def listar_tickets_de_usuario(
     return total, [_fila_a_resumen(fila) for fila in filas]
 
 
-def obtener_ticket(conexion: Connection, numero: str) -> Optional[Dict[str, Any]]:
-    """Cabecera de un ticket por su número (el que ve el cliente)."""
+def obtener_ticket(conexion: Connection, numero: str,
+                   org_id: int = ORG_TODAS) -> Optional[Dict[str, Any]]:
+    """Cabecera de un ticket por su número (el que ve el cliente).
+
+    Un ticket de otra organización se comporta como uno inexistente: el
+    servicio lo traduce a 404. Un 403 confirmaría que ese número existe, y
+    los números de osTicket son enumerables.
+    """
+    condiciones, params = _filtro_org(org_id)
+    where = " AND ".join(["t.number = :numero", _EXCLUIR_BORRADOS, *condiciones])
+
     fila = conexion.execute(
-        text(f"{_SELECT_TICKET} WHERE t.number = :numero AND {_EXCLUIR_BORRADOS} LIMIT 1"),
-        {"numero": numero},
+        text(f"{_SELECT_TICKET} WHERE {where} LIMIT 1"),
+        {"numero": numero, **params},
     ).first()
     if not fila:
         return None
@@ -288,8 +338,22 @@ def _adjuntos_por_entrada(conexion: Connection,
     return agrupados
 
 
-def obtener_estado(conexion: Connection, numero: str) -> Optional[Dict[str, Any]]:
-    """Consulta mínima de estado: no toca cdata ni el hilo."""
+def obtener_estado(conexion: Connection, numero: str,
+                   org_id: int = ORG_TODAS) -> Optional[Dict[str, Any]]:
+    """Consulta mínima de estado: no toca cdata ni el hilo.
+
+    A diferencia de _SELECT_TICKET, esta consulta no necesitaba ost_user para
+    nada; se joinea solo para poder filtrar por organización. Sin ese join,
+    este endpoint sería el agujero por donde un cliente confirmaría el estado
+    de los tickets de otro.
+    """
+    condiciones, params = _filtro_org(org_id)
+    where = " AND ".join([
+        "t.number = :numero",
+        "COALESCE(s.state, '') <> 'deleted'",
+        *condiciones,
+    ])
+
     fila = conexion.execute(
         text(f"""
             SELECT t.number, t.created, t.updated, t.closed, t.duedate, t.isoverdue,
@@ -298,11 +362,11 @@ def obtener_estado(conexion: Connection, numero: str) -> Optional[Dict[str, Any]
             FROM {P}ticket t
             LEFT JOIN {P}ticket_status s ON s.id = t.status_id
             LEFT JOIN {P}staff st ON st.staff_id = t.staff_id
-            WHERE t.number = :numero
-              AND COALESCE(s.state, '') <> 'deleted'
+            LEFT JOIN {P}user u ON u.id = t.user_id
+            WHERE {where}
             LIMIT 1
         """),
-        {"numero": numero},
+        {"numero": numero, **params},
     ).first()
     if not fila:
         return None
