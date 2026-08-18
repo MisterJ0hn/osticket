@@ -300,7 +300,7 @@ def crear_ticket(
                  title, body, format, ip_address, created, updated)
             VALUES
                 (0, :thread_id, 0, :user_id, 'M', 0, :poster, 'API',
-                 :titulo, :cuerpo, 'text', :ip, NOW(), NOW())
+                 :titulo, :cuerpo, 'html', :ip, NOW(), NOW())
         """),
         {
             "thread_id": thread_id,
