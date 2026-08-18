@@ -1,5 +1,6 @@
-# El Dockerfile solo copia requirements.txt y app/, pero el contexto se sube
-# entero al daemon: sin esto, el .venv (cientos de MB) viaja en cada build.
+# El Dockerfile copia requirements.txt, app/, scripts/ y sql/, pero el
+# contexto se sube entero al daemon: sin esto, el .venv (cientos de MB)
+# viaja en cada build.
 .venv/
 venv/
 __pycache__/
