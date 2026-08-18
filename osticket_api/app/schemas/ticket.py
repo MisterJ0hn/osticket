@@ -152,6 +152,25 @@ class AdjuntoInfo(BaseModel):
     nombre: Optional[str] = None
     tipo_mime: Optional[str] = None
     tamano: Optional[int] = None
+    inline: bool = Field(
+        False,
+        description="La imagen va incrustada en el cuerpo del mensaje, no "
+                    "adjunta debajo. Pasa con los tickets creados desde el "
+                    "portal web",
+    )
+    cid: Optional[str] = Field(
+        None,
+        description="Solo en los incrustados: el cuerpo los referencia como "
+                    '<img src="cid:ESTE-VALOR">',
+    )
+    contenido_base64: Optional[str] = Field(
+        None,
+        description="Contenido del archivo. Solo viene si se pidió con "
+                    "incluir_contenido=true",
+    )
+    error: Optional[str] = Field(
+        None, description="Por qué no se pudo devolver el contenido"
+    )
 
 
 class TicketDetalle(TicketResumen):

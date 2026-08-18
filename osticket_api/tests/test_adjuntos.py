@@ -221,3 +221,59 @@ def test_el_prefijo_data_no_llega_a_la_base(monkeypatch):
     assert not escrito["cuerpo"].startswith("data:")
     assert escrito["cuerpo"] == "<p>se aumenta limite</p>"
     assert escrito["formato"] == "html"
+
+
+# ─────────────────────────────────────────────────────────────
+# Diagnóstico de la API Key nativa
+# ─────────────────────────────────────────────────────────────
+# osTicket busca la clave con `WHERE apikey=... AND ipaddr=...` y, si no hay
+# fila, contesta 401 "Valid API key required" sin decir cuál de las dos
+# falló. Como acá sí se puede leer ost_api_key, se separan los casos.
+
+def test_salud_avisa_si_la_clave_no_existe(cliente_sin_auth, monkeypatch):
+    from app import main
+    monkeypatch.setattr(main, "verificar_conexion", lambda: True)
+    monkeypatch.setattr(main, "verificar_esquema", lambda: None)
+    monkeypatch.setattr(main, "_estado_de_adjuntos", lambda: "ok")
+    monkeypatch.setattr(main, "_estado_de_api_key",
+                        lambda: "la clave configurada NO existe en ost_api_key")
+
+    cuerpo = cliente_sin_auth.get("/salud").json()
+    assert "NO existe" in cuerpo["api_nativa"]
+
+
+def test_salud_publica_la_ip_registrada(cliente_sin_auth, monkeypatch):
+    """Cotejar esa IP con la del log de osTicket es lo que resuelve el 401."""
+    from app import main
+    monkeypatch.setattr(main, "verificar_conexion", lambda: True)
+    monkeypatch.setattr(main, "verificar_esquema", lambda: None)
+    monkeypatch.setattr(main, "_estado_de_adjuntos", lambda: "ok")
+    monkeypatch.setattr(main, "_estado_de_api_key",
+                        lambda: "clave ok, registrada para la IP 172.18.0.1")
+
+    assert "172.18.0.1" in cliente_sin_auth.get("/salud").json()["api_nativa"]
+
+
+@pytest.mark.parametrize("fila, esperado", [
+    (None, "NO existe"),
+    ({"ip_registrada": "1.2.3.4", "activa": False, "puede_crear": True}, "desactivada"),
+    ({"ip_registrada": "1.2.3.4", "activa": True, "puede_crear": False}, "no puede crear"),
+    ({"ip_registrada": "1.2.3.4", "activa": True, "puede_crear": True}, "1.2.3.4"),
+])
+def test_estado_de_la_clave_distingue_cada_causa(monkeypatch, fila, esperado):
+    from app import main
+    from app.repositories import ticket_repo
+    from contextlib import contextmanager
+
+    @contextmanager
+    def conexion_falsa():
+        yield None
+
+    class EngineFalso:
+        connect = staticmethod(conexion_falsa)
+
+    monkeypatch.setattr(main.settings, "OSTICKET_API_KEY", "una-clave", raising=False)
+    monkeypatch.setattr(ticket_repo, "estado_api_key", lambda conexion, apikey: fila)
+    monkeypatch.setattr("app.core.database.engine", EngineFalso)
+
+    assert esperado in main._estado_de_api_key()

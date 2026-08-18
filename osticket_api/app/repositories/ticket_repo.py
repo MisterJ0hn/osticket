@@ -308,20 +308,28 @@ def _adjuntos_por_entrada(conexion: Connection,
 
     En ost_attachment, las entradas del hilo se identifican con type='H'
     (ver upload/include/class.thread.php:1237); object_id es el id de la
-    entrada. Se excluyen los `inline`: son imágenes incrustadas en el cuerpo
-    del mensaje, no archivos que el usuario adjuntó.
+    entrada.
+
+    Se incluyen también los `inline`, que antes se descartaban. Son las
+    imágenes incrustadas en el cuerpo: cuando el ticket se crea desde el
+    portal web, la foto va como <img src="cid:LA-CLAVE"> dentro del HTML y
+    su fila lleva inline = 1. Excluirlas hacía que esas imágenes no
+    aparecieran por ninguna parte en la respuesta de la API, ni como adjunto
+    ni de otra forma. Se marcan con `inline` y se publica su `cid` para que
+    el consumidor pueda cruzarlas con el src del cuerpo.
     """
     if not ids_entrada:
         return {}
 
     filas = conexion.execute(
         text(f"""
-            SELECT a.object_id, a.id, COALESCE(a.name, f.name) AS nombre,
-                   f.type AS tipo_mime, f.size AS tamano
+            SELECT a.object_id, a.id, a.file_id, a.inline,
+                   COALESCE(a.name, f.name) AS nombre,
+                   f.type AS tipo_mime, f.size AS tamano,
+                   f.`key` AS clave, f.bk
             FROM {P}attachment a
             LEFT JOIN {P}file f ON f.id = a.file_id
             WHERE a.type = 'H'
-              AND a.inline = 0
               AND a.object_id IN :ids
         """).bindparams(bindparam("ids", expanding=True)),
         {"ids": ids_entrada},
@@ -331,11 +339,69 @@ def _adjuntos_por_entrada(conexion: Connection,
     for fila in filas:
         agrupados.setdefault(fila.object_id, []).append({
             "id": fila.id,
+            "file_id": fila.file_id,
             "nombre": fila.nombre,
             "tipo_mime": fila.tipo_mime,
             "tamano": fila.tamano,
+            "inline": bool(fila.inline),
+            # El cuerpo referencia las imágenes incrustadas como
+            # <img src="cid:LA-CLAVE">, y esa clave es ost_file.key. Se
+            # publica para poder emparejarlas sin tener que parsear el HTML
+            # a ciegas.
+            "cid": fila.clave if fila.inline else None,
+            # Backend de almacenamiento (ost_file.bk). 'D' = el contenido
+            # está en ost_file_chunk, que es lo único que se puede leer
+            # desde acá; con otro backend el archivo vive en disco o en un
+            # servicio externo, fuera del alcance de esta API.
+            "_bk": fila.bk,
         })
     return agrupados
+
+
+def contenido_de_archivos(conexion: Connection,
+                          ids_archivo: List[int]) -> Dict[int, bytes]:
+    """Contenido binario de los archivos, leído de ost_file_chunk.
+
+    osTicket trocea los archivos y los lee en orden de chunk_id
+    (AttachmentChunkedData, upload/include/class.file.php:930). Respetar ese
+    orden es obligatorio: concatenar los trozos como vengan da un archivo
+    corrupto, y es un fallo que no se nota hasta que alguien intenta abrir
+    la imagen.
+
+    Los trozos se traen como filas y se unen en Python, y NO con un
+    GROUP_CONCAT en la base. GROUP_CONCAT devuelve un tipo de texto con el
+    charset de la conexión (acá utf8mb4): pasar bytes de un JPEG por esa
+    conversión los corrompe. Además tiene el tope group_concat_max_len, de
+    1024 bytes por defecto, que trunca en silencio.
+
+    Solo aplica a los archivos con bk = 'D' (los guardados en la base), que
+    es el backend por defecto de osTicket.
+    """
+    if not ids_archivo:
+        return {}
+
+    filas = conexion.execute(
+        text(f"""
+            SELECT file_id, filedata
+            FROM {P}file_chunk
+            WHERE file_id IN :ids
+            ORDER BY file_id, chunk_id
+        """).bindparams(bindparam("ids", expanding=True)),
+        {"ids": ids_archivo},
+    ).all()
+
+    trozos: Dict[int, List[bytes]] = {}
+    for fila in filas:
+        datos = fila.filedata
+        if datos is None:
+            continue
+        if not isinstance(datos, (bytes, bytearray)):
+            # Si el driver devolviera texto, se vuelve a bytes sin pasar por
+            # una decodificación que ya habría alterado el binario.
+            datos = str(datos).encode("latin-1", errors="replace")
+        trozos.setdefault(fila.file_id, []).append(bytes(datos))
+
+    return {file_id: b"".join(partes) for file_id, partes in trozos.items()}
 
 
 def obtener_estado(conexion: Connection, numero: str,
@@ -382,6 +448,39 @@ def obtener_estado(conexion: Connection, numero: str,
         "cerrado": fila.closed,
         "vencimiento": fila.duedate,
         "atrasado": bool(fila.isoverdue),
+    }
+
+
+def estado_api_key(conexion: Connection, apikey: str) -> Optional[Dict[str, Any]]:
+    """Diagnostica la API Key nativa contra ost_api_key.
+
+    osTicket la busca con `WHERE apikey=... AND ipaddr=...`
+    (upload/include/class.api.php:104), coincidencia EXACTA en las dos
+    columnas, y cuando no encuentra fila contesta 401 "Valid API key
+    required" sin decir cuál de las dos falló. Como acá sí se puede leer la
+    tabla, se busca solo por la clave: así se distingue "la clave no existe"
+    de "existe, pero registrada para otra IP", que son arreglos distintos.
+
+    Devuelve None si la clave no está en la tabla.
+    """
+    if not apikey:
+        return None
+
+    fila = conexion.execute(
+        text(f"""
+            SELECT ipaddr, isactive, can_create_tickets
+            FROM {P}api_key
+            WHERE apikey = :apikey
+            LIMIT 1
+        """),
+        {"apikey": apikey},
+    ).first()
+    if not fila:
+        return None
+    return {
+        "ip_registrada": fila.ipaddr,
+        "activa": bool(fila.isactive),
+        "puede_crear": bool(fila.can_create_tickets),
     }
 
 

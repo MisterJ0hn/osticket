@@ -45,7 +45,55 @@ async def lifespan(app: FastAPI):
     else:
         _avisar_de_clientes()
         _avisar_de_adjuntos()
+        _avisar_de_api_key()
     yield
+
+
+def _avisar_de_api_key() -> None:
+    """Revisa la API Key nativa contra ost_api_key antes del primer ticket.
+
+    Con la clave mal registrada, osTicket contesta 401 y TODOS los tickets
+    entran por el fallback SQL: sin adjuntos, sin filtros, sin SLA y sin
+    notificaciones. Como el ticket igual se crea, el problema puede pasar
+    semanas inadvertido. Detectarlo al arrancar es la diferencia entre
+    revisarlo ahora o descubrirlo cuando alguien reclame por una imagen que
+    no llegó.
+    """
+    from app.core import database
+    from app.repositories import ticket_repo
+
+    if not settings.OSTICKET_API_KEY:
+        return
+
+    try:
+        with database.engine.connect() as conexion:
+            estado = ticket_repo.estado_api_key(conexion, settings.OSTICKET_API_KEY)
+    except Exception:
+        logger.exception("No se pudo revisar la API Key de osTicket")
+        return
+
+    if estado is None:
+        logger.error(
+            "La OSTICKET_API_KEY configurada no existe en ost_api_key: osTicket "
+            "responderá 401 y todos los tickets caerán al fallback SQL (sin "
+            "adjuntos). Darla de alta en Panel Admin -> Manage -> API Keys."
+        )
+        return
+
+    if not estado["activa"]:
+        logger.error("La API Key de osTicket está DESACTIVADA (isactive = 0).")
+    if not estado["puede_crear"]:
+        logger.error("La API Key de osTicket no tiene permiso para crear tickets.")
+
+    # La IP no se puede comparar desde acá: la que ve osTicket depende del
+    # camino de red (con OSTICKET_URL pública, el NAT la reescribe). Se
+    # publica para poder cotejarla con la del log de osTicket.
+    logger.info(
+        "API Key de osTicket registrada para la IP %s. Si osTicket responde "
+        "401, es que las peticiones le llegan desde otra IP: comprobar con "
+        "docker compose logs osticket | grep api/tickets.json",
+        estado["ip_registrada"],
+    )
 
 
 def _avisar_de_adjuntos() -> None:
@@ -165,6 +213,29 @@ async def manejar_error_no_controlado(request: Request, exc: Exception):
 app.include_router(api_router)
 
 
+def _estado_de_api_key() -> str:
+    """Estado de la API Key nativa, para verlo sin entrar al servidor."""
+    from app.core import database
+    from app.repositories import ticket_repo
+
+    if not settings.OSTICKET_API_KEY:
+        return "sin OSTICKET_API_KEY: todo entra por el fallback SQL"
+
+    try:
+        with database.engine.connect() as conexion:
+            estado = ticket_repo.estado_api_key(conexion, settings.OSTICKET_API_KEY)
+    except Exception:
+        return "no se pudo comprobar"
+
+    if estado is None:
+        return "la clave configurada NO existe en ost_api_key"
+    if not estado["activa"]:
+        return "la clave está desactivada (isactive = 0)"
+    if not estado["puede_crear"]:
+        return "la clave no puede crear tickets"
+    return f"clave ok, registrada para la IP {estado['ip_registrada']}"
+
+
 def _estado_de_adjuntos() -> str:
     from app.core import database
     from app.repositories import ticket_repo
@@ -187,11 +258,13 @@ def salud():
     # con los adjuntos deshabilitados osTicket los descarta sin error y los
     # tickets quedan sin las imágenes.
     adjuntos = _estado_de_adjuntos() if base_ok else "desconocido"
+    api_nativa = _estado_de_api_key() if base_ok else "desconocido"
 
     return {
         "exito": base_ok and not problema,
         "base_datos": "ok" if base_ok else "sin conexión",
         "adjuntos": adjuntos,
+        "api_nativa": api_nativa,
         # Distingue "no conecto" de "conecto a la base equivocada", que es el
         # fallo silencioso: la conexión funciona pero los datos no son los del
         # helpdesk.

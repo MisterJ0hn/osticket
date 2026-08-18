@@ -110,10 +110,22 @@ def detalle_ticket(
                     "para el cliente en el portal, así que solo tiene efecto si "
                     "la clave tiene el permiso 'notas'; sin él se ignora",
     ),
+    incluir_contenido: bool = Query(
+        False,
+        description="Devolver el contenido de los adjuntos en base64, dentro "
+                    "de cada mensaje y respuesta. Aumenta mucho el tamaño de "
+                    "la respuesta: usar solo cuando se necesiten los archivos",
+    ),
     cliente: ClienteApi = Depends(exigir(PERMISO_LEER)),
     conexion: Connection = Depends(obtener_conexion),
 ) ->TicketDetalle:
-    """Cabecera del ticket más el hilo completo de mensajes y respuestas."""
+    """Cabecera del ticket más el hilo completo de mensajes y respuestas.
+
+    Con `incluir_contenido=true` cada adjunto trae su `contenido_base64`.
+    Las imágenes incrustadas en el cuerpo (las de los tickets creados desde
+    el portal web) vienen marcadas con `inline: true` y su `cid`, que es lo
+    que el HTML del mensaje referencia como `<img src="cid:...">`.
+    """
     # Las notas internas son comentarios que los agentes escriben dando por
     # hecho que el cliente no los lee. El filtro por organización no basta
     # acá: son datos de la propia organización, pero igual no le corresponden
@@ -121,7 +133,8 @@ def detalle_ticket(
     # error: quien no tiene el permiso no tiene por qué saber que existe.
     notas = incluir_notas and cliente.puede(PERMISO_NOTAS)
     return TicketDetalle(**ticket_service.obtener_detalle(
-        conexion, numero, notas, org_id=cliente.org_id
+        conexion, numero, notas, org_id=cliente.org_id,
+        incluir_contenido=incluir_contenido,
     ))
 
 

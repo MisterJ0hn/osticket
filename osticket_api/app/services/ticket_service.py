@@ -1,5 +1,6 @@
 """Orquestación: qué camino usa cada operación y cómo se combinan."""
 
+import base64
 import logging
 from datetime import date
 from typing import Any, Dict, List, Optional
@@ -228,14 +229,87 @@ def listar_tickets(
 
 def obtener_detalle(conexion: Connection, numero: str,
                     incluir_notas: bool = False,
-                    org_id: int = ORG_TODAS) -> Dict[str, Any]:
+                    org_id: int = ORG_TODAS,
+                    incluir_contenido: bool = False) -> Dict[str, Any]:
     detalle = ticket_repo.obtener_ticket(conexion, numero, org_id=org_id)
     if not detalle:
         raise RecursoNoEncontrado(f"No existe el ticket {numero}")
 
     thread_id = detalle.pop("_thread_id", None)
-    detalle["mensajes"] = ticket_repo.obtener_hilo(conexion, thread_id, incluir_notas)
+    mensajes = ticket_repo.obtener_hilo(conexion, thread_id, incluir_notas)
+
+    if incluir_contenido:
+        _adjuntar_contenido(conexion, mensajes)
+    else:
+        # El campo interno del backend no se publica nunca.
+        for mensaje in mensajes:
+            for adjunto in mensaje["adjuntos"]:
+                adjunto.pop("_bk", None)
+                adjunto.pop("file_id", None)
+
+    detalle["mensajes"] = mensajes
     return detalle
+
+
+def _adjuntar_contenido(conexion: Connection, mensajes: List[Dict[str, Any]]) -> None:
+    """Rellena `contenido_base64` de cada adjunto del hilo.
+
+    Se resuelve en UNA consulta para todo el ticket, no una por archivo: un
+    hilo largo con capturas en varias respuestas haría decenas de viajes a
+    la base para armar una sola respuesta.
+
+    Los que no se pueden entregar se devuelven igual, con `error` explicando
+    por qué. Omitirlos en silencio dejaría al consumidor creyendo que el
+    mensaje no tenía imagen.
+    """
+    adjuntos = [a for mensaje in mensajes for a in mensaje["adjuntos"]]
+    if not adjuntos:
+        return
+
+    maximo = settings.ADJUNTOS_DESCARGA_MAX_MB * 1024 * 1024
+    descargables = []
+    acumulado = 0
+
+    for adjunto in adjuntos:
+        backend = adjunto.pop("_bk", None)
+        file_id = adjunto.pop("file_id", None)
+
+        if backend and backend != "D":
+            # osTicket admite guardar los archivos en disco o en un servicio
+            # externo (ost_file.bk). Solo el backend 'D' guarda el contenido
+            # en la base, que es lo único alcanzable desde acá.
+            adjunto["error"] = (
+                f"El archivo está en el almacenamiento '{backend}' de osTicket, "
+                "no en la base: no se puede leer desde esta API"
+            )
+            continue
+
+        tamano = adjunto.get("tamano") or 0
+        if acumulado + tamano > maximo:
+            adjunto["error"] = (
+                f"Se superó el máximo de {settings.ADJUNTOS_DESCARGA_MAX_MB} MB "
+                "de contenido por respuesta. Pedir el ticket sin "
+                "incluir_contenido y descargar este adjunto aparte"
+            )
+            continue
+
+        acumulado += tamano
+        if file_id:
+            descargables.append((file_id, adjunto))
+
+    if not descargables:
+        return
+
+    contenidos = ticket_repo.contenido_de_archivos(
+        conexion, [file_id for file_id, _ in descargables]
+    )
+
+    for file_id, adjunto in descargables:
+        datos = contenidos.get(file_id)
+        if datos is None:
+            adjunto["error"] = "El archivo no tiene contenido en la base"
+        else:
+            adjunto["contenido_base64"] = base64.b64encode(datos).decode("ascii")
 
 
 def obtener_estado(conexion: Connection, numero: str,

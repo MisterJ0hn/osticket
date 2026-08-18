@@ -34,7 +34,7 @@ organización de osTicket**: ver *Clientes de la API*.
 |---|---|---|
 | `POST` | `/api/v1/tickets` | Crear ticket |
 | `GET` | `/api/v1/tickets?email=...` | Tickets creados por ese usuario (por defecto, solo los abiertos) |
-| `GET` | `/api/v1/tickets/{numero}` | Detalle: cabecera + hilo de mensajes + adjuntos |
+| `GET` | `/api/v1/tickets/{numero}` | Detalle: cabecera + hilo de mensajes + adjuntos (con `incluir_contenido=true`, los archivos en base64) |
 | `GET` | `/api/v1/tickets/{numero}/estado` | Estado (consulta liviana, para polling) |
 | `GET` | `/api/v1/catalogos/{temas\|estados\|prioridades}` | Ids configurables del helpdesk |
 | `GET` | `/salud` | Ping del servicio (sin autenticación) |
@@ -121,7 +121,8 @@ Ver `.env.example`. Las que más importan:
 | `OSTICKET_API_KEY` | La clave del paso anterior |
 | `OSTICKET_FALLBACK_SQL` | `false` para fallar en vez de insertar directo en MySQL |
 | `OSTICKET_TIMEOUT_ADJUNTOS` | Timeout para peticiones con adjuntos (120s). Debe ser >= al `max_execution_time` de PHP |
-| `ADJUNTOS_MAX_MB` | Tope del conjunto de adjuntos de un ticket (25 MB) |
+| `ADJUNTOS_MAX_MB` | Tope del conjunto de adjuntos al **crear** un ticket (25 MB) |
+| `ADJUNTOS_DESCARGA_MAX_MB` | Tope del contenido devuelto en un detalle con `incluir_contenido=true` (15 MB) |
 | `API_KEYS` | **Heredado.** Claves anónimas que ven TODO el helpdesk. Lo nuevo va en la tabla `api_cliente` (ver *Clientes de la API*) |
 | `CACHE_CLIENTES_TTL` | Cada cuántos segundos se relee `api_cliente`. Marca el retardo con el que surte efecto una baja (60 por defecto) |
 | `IPS_PERMITIDAS` | IPs/CIDR autorizados. **Vacío = sin filtro por IP** |
@@ -188,6 +189,57 @@ permiso, el parámetro se ignora en silencio.
 Las claves que estén en `API_KEYS` siguen funcionando como clientes internos
 (ven todo, como antes) y el arranque avisa de cada una. Una vez dadas de alta
 en `api_cliente`, se vacía la variable y se recrea el contenedor.
+
+## Recuperar los archivos de un ticket
+
+Por defecto el detalle trae solo los **metadatos** de cada adjunto (nombre,
+tipo, tamaño): incluir el contenido en cada consulta arrastraría megabytes.
+Con `incluir_contenido=true` viene además el archivo en base64:
+
+```bash
+curl -H "X-API-Key: $CLAVE"   "http://SERVIDOR:7091/api/v1/tickets/483920?incluir_contenido=true"
+```
+
+```json
+{
+  "mensajes": [{
+    "tipo": "mensaje",
+    "cuerpo": "<p>Adjunto la pantalla</p>",
+    "adjuntos": [{
+      "id": 12, "nombre": "foto.jpg", "tipo_mime": "image/jpeg",
+      "tamano": 184320, "inline": false, "cid": null,
+      "contenido_base64": "/9j/4AAQSkZJRg...", "error": null
+    }]
+  }]
+}
+```
+
+Aplica igual a los mensajes y a las **respuestas de los agentes**: todo el
+hilo se resuelve en una sola consulta a la base.
+
+### Imágenes incrustadas en el cuerpo
+
+Los tickets creados desde el portal web llevan la imagen **dentro** del HTML:
+
+```html
+<figure><img src="cid:8u5pbmprkplgc3rwlkl4zqatcxxan2d4" ...></figure>
+```
+
+Esos adjuntos vienen con `inline: true` y su `cid`, que es lo que el `src`
+referencia. Para mostrar el mensaje con la imagen, se reemplaza `cid:LA-CLAVE`
+por el data URI armado con `tipo_mime` y `contenido_base64`.
+
+### Cuando un adjunto no se puede entregar
+
+Se devuelve igual, con `contenido_base64` en `null` y el motivo en `error`
+(omitirlo haría creer que el mensaje no traía imagen). Dos casos:
+
+- **Otro almacenamiento**: osTicket puede guardar los archivos fuera de la
+  base (`ost_file.bk` distinto de `D`). Solo el contenido guardado en la base
+  es alcanzable desde acá.
+- **Tope de tamaño**: si el ticket supera `ADJUNTOS_DESCARGA_MAX_MB`, los
+  adjuntos que no caben se marcan con el error en vez de reventar la
+  respuesta.
 
 ## Sobre el fallback SQL
 

@@ -59,6 +59,11 @@ class Settings(BaseSettings):
     # Por debajo del max_file_size de osTicket (32 MB) para poder rechazarlo
     # con un mensaje claro en vez de que reviente más adelante.
     ADJUNTOS_MAX_MB: int = 25
+    # Tope de lo que se devuelve en un GET de detalle con
+    # incluir_contenido=true. Los adjuntos van en base64 dentro del JSON,
+    # así que ocupan ~33% más que el archivo y se arman enteros en memoria:
+    # sin tope, un ticket con varias fotos tumba el proceso.
+    ADJUNTOS_DESCARGA_MAX_MB: int = 15
     OSTICKET_FALLBACK_SQL: bool = True
 
     # ── Seguridad de este servicio ──
