@@ -1,3 +1,4 @@
+import base64
 from contextlib import contextmanager
 
 import pytest
@@ -46,7 +47,7 @@ def test_responder_agrega_el_mensaje(cliente, repos):
 
     def responder(conexion, **kw):
         llamada.update(kw)
-        return {"mensaje_id": 321}
+        return {"mensaje_id": 321, "adjuntos_guardados": 0}
 
     escritura.responder_ticket = responder
 
@@ -58,11 +59,69 @@ def test_responder_agrega_el_mensaje(cliente, repos):
 
     assert respuesta.status_code == 201
     cuerpo = respuesta.json()
-    assert cuerpo == {"exito": True, "numero": "483920", "mensaje_id": 321}
+    assert cuerpo == {"exito": True, "numero": "483920", "mensaje_id": 321,
+                      "adjuntos_guardados": 0}
     assert llamada["ticket_id"] == 17
     assert llamada["thread_id"] == 99
     assert llamada["user_id"] == 5
     assert llamada["mensaje"] == "Gracias, ya funciona"
+    assert llamada["adjuntos"] == []
+
+
+def test_responder_con_una_imagen_adjunta(cliente, repos):
+    lectura, escritura = repos
+    lectura.obtener_ticket = lambda conexion, numero, **kw: TICKET
+    llamada = {}
+
+    def responder(conexion, **kw):
+        llamada.update(kw)
+        return {"mensaje_id": 322, "adjuntos_guardados": len(kw["adjuntos"])}
+
+    escritura.responder_ticket = responder
+
+    contenido = base64.b64encode(b"contenido-de-la-imagen").decode()
+    respuesta = cliente.post(
+        "/api/v1/tickets/483920/mensajes",
+        json={
+            "email": "cliente@ejemplo.cl",
+            "mensaje": "Les mando una foto",
+            "adjuntos": [
+                {"nombre": "foto.png", "contenido_base64": contenido,
+                 "tipo_mime": "image/png"}
+            ],
+        },
+        headers=CABECERAS,
+    )
+
+    assert respuesta.status_code == 201
+    cuerpo = respuesta.json()
+    assert cuerpo["adjuntos_guardados"] == 1
+    assert llamada["adjuntos"] == [
+        {"nombre": "foto.png", "tipo_mime": "image/png",
+         "contenido": b"contenido-de-la-imagen"}
+    ]
+
+
+def test_responder_con_adjunto_no_base64_da_400(cliente, repos):
+    lectura, escritura = repos
+    lectura.obtener_ticket = lambda conexion, numero, **kw: TICKET
+    escritura.responder_ticket = lambda conexion, **kw: pytest.fail(
+        "no debería escribir si el adjunto no es base64 válido"
+    )
+
+    respuesta = cliente.post(
+        "/api/v1/tickets/483920/mensajes",
+        json={
+            "email": "cliente@ejemplo.cl",
+            "mensaje": "Les mando una foto",
+            "adjuntos": [
+                {"nombre": "foto.png", "contenido_base64": "no-es-base64!!",
+                 "tipo_mime": "image/png"}
+            ],
+        },
+        headers=CABECERAS,
+    )
+    assert respuesta.status_code == 400
 
 
 def test_responder_ticket_inexistente_da_404(cliente, repos):

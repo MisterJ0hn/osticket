@@ -16,10 +16,11 @@ Lo que este camino NO hace, y por eso los tickets quedan marcados con
 Preferir siempre la API nativa: `OSTICKET_FALLBACK_SQL=false` desactiva esto.
 """
 
+import hashlib
 import logging
 import re
 import secrets
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -35,6 +36,11 @@ P = settings.prefijo
 # no tiene índice único (solo hay PK en ticket_id), así que la unicidad hay que
 # comprobarla a mano, igual que hace Ticket::isTicketNumberUnique().
 _MAX_INTENTOS_NUMERO = 10
+
+# Mismo tamaño de bloque que AttachmentChunkedData (upload/include/
+# class.file.php:917): ost_file_chunk.filedata es LONGBLOB, pero osTicket lo
+# trocea igual para no tener que armar el archivo entero en una sola fila.
+_CHUNK_SIZE = 500 * 1024
 
 
 def _config(conexion: Connection, clave: str, defecto: Optional[str] = None) -> Optional[str]:
@@ -386,6 +392,75 @@ def crear_ticket(
     return {"numero": numero, "ticket_id": ticket_id, "user_id": user_id}
 
 
+def _guardar_archivo(conexion: Connection, contenido: bytes, nombre: str,
+                     tipo_mime: str) -> int:
+    """Sube un archivo con backend 'D' (contenido en la base), sin osTicket.
+
+    Réplica mínima de AttachmentFile::create() + AttachmentChunkedData::write()
+    (upload/include/class.file.php:408 y 972): una fila en ost_file y el
+    contenido troceado en ost_file_chunk. 'D' es el backend por defecto de
+    osTicket (FileStorageBackend::lookup($cfg->getDefaultStorageBackendChar()
+    ?: 'D')) y el único que esta API puede leer después (ver el comentario
+    de `_bk` en ticket_repo._adjuntos_por_entrada): si el helpdesk está
+    configurado con disco o un backend externo, estos adjuntos igual quedan
+    en la base y se pueden leer, aunque los que suba el portal web no.
+
+    `key` y `signature` no necesitan replicar el algoritmo exacto de
+    osTicket (microtime + sha1 del archivo): son un identificador opaco y un
+    hash para deduplicar, no algo que otro código verifique. Alcanza con que
+    `key` sea único.
+    """
+    clave = secrets.token_urlsafe(24)  # 32 caracteres, mismo largo que usa osTicket
+    firma = hashlib.sha256(contenido).hexdigest()
+
+    file_id = conexion.execute(
+        text(f"""
+            INSERT INTO {P}file (ft, bk, type, size, `key`, signature, name, created)
+            VALUES ('T', 'D', :tipo, :tamano, :clave, :firma, :nombre, NOW())
+        """),
+        {
+            "tipo": (tipo_mime or "application/octet-stream")[:255],
+            "tamano": len(contenido),
+            "clave": clave,
+            "firma": firma,
+            "nombre": nombre[:255],
+        },
+    ).lastrowid
+
+    for chunk_id, inicio in enumerate(range(0, len(contenido), _CHUNK_SIZE)):
+        conexion.execute(
+            text(f"""
+                INSERT INTO {P}file_chunk (file_id, chunk_id, filedata)
+                VALUES (:file_id, :chunk_id, :filedata)
+            """),
+            {
+                "file_id": file_id,
+                "chunk_id": chunk_id,
+                "filedata": contenido[inicio:inicio + _CHUNK_SIZE],
+            },
+        )
+
+    return file_id
+
+
+def _adjuntar_a_entrada(conexion: Connection, entry_id: int, file_id: int,
+                        nombre: str) -> int:
+    """Vincula un archivo ya subido a una entrada del hilo (ost_attachment).
+
+    type='H': así identifica osTicket las entradas del hilo
+    (ThreadEntry::createAttachment, upload/include/class.thread.php:1237).
+    Las filas de ejemplo que trae el dump de instalación usan otra letra
+    ('T'); es de un esquema anterior y el código actual ya no la escribe.
+    """
+    return conexion.execute(
+        text(f"""
+            INSERT INTO {P}attachment (object_id, type, file_id, name, inline)
+            VALUES (:object_id, 'H', :file_id, :nombre, 0)
+        """),
+        {"object_id": entry_id, "file_id": file_id, "nombre": nombre[:255]},
+    ).lastrowid
+
+
 def responder_ticket(
     conexion: Connection,
     *,
@@ -395,6 +470,7 @@ def responder_ticket(
     poster: str,
     mensaje: str,
     ip_origen: str = "",
+    adjuntos: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Agrega un mensaje del cliente al hilo de un ticket que ya existe.
 
@@ -402,8 +478,13 @@ def responder_ticket(
     solo tiene POST /api/tickets.* para CREAR, ver upload/include/api.tickets.php):
     esto no es un fallback, es el único camino. Réplica mínima de lo que hace
     Ticket::onMessage() al llegar un mensaje del usuario (upload/include/
-    class.ticket.php:1889): agrega la entrada del hilo y marca isanswered=0
-    con el lastupdate/lastmessage al día.
+    class.ticket.php:1889): agrega la entrada del hilo, sube y vincula los
+    adjuntos, y marca isanswered=0 con el lastupdate/lastmessage al día.
+
+    `adjuntos` es una lista de dicts {"nombre", "tipo_mime", "contenido"}
+    con el contenido YA decodificado (bytes): decodificar y validar el
+    base64 es responsabilidad de quien llama, para poder devolver un 400
+    claro antes de abrir la transacción.
 
     Lo que NO hace, a propósito:
       * no reabre el ticket si está cerrado (reopen() recalcula el SLA y
@@ -411,9 +492,6 @@ def responder_ticket(
         arriesgado). Si el ticket está cerrado, el mensaje igual se guarda,
         pero un agente tiene que reabrirlo a mano.
       * no manda alerta al agente asignado ni a los colaboradores.
-      * no acepta adjuntos (mismo motivo que crear_ticket: escribir en
-        ost_file/ost_file_chunk depende del backend de almacenamiento
-        configurado).
     """
     cuerpo = rfc2397.parsear_mensaje(mensaje)
 
@@ -436,6 +514,14 @@ def responder_ticket(
         },
     ).lastrowid
 
+    adjuntos_guardados = 0
+    for adjunto in (adjuntos or []):
+        file_id = _guardar_archivo(
+            conexion, adjunto["contenido"], adjunto["nombre"], adjunto["tipo_mime"]
+        )
+        _adjuntar_a_entrada(conexion, entry_id, file_id, adjunto["nombre"])
+        adjuntos_guardados += 1
+
     conexion.execute(
         text(f"UPDATE {P}thread SET lastmessage = NOW() WHERE id = :thread_id"),
         {"thread_id": thread_id},
@@ -449,8 +535,9 @@ def responder_ticket(
     )
 
     logger.warning(
-        "Mensaje %s agregado al ticket_id=%s por SQL directo: no se reabre "
-        "si estaba cerrado ni se avisa al agente asignado", entry_id, ticket_id,
+        "Mensaje %s agregado al ticket_id=%s por SQL directo (%s adjuntos): "
+        "no se reabre si estaba cerrado ni se avisa al agente asignado",
+        entry_id, ticket_id, adjuntos_guardados,
     )
 
-    return {"mensaje_id": entry_id}
+    return {"mensaje_id": entry_id, "adjuntos_guardados": adjuntos_guardados}

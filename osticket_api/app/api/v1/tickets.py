@@ -113,9 +113,10 @@ def responder_ticket(
     """Agrega un mensaje del cliente al hilo de un ticket ya existente.
 
     `email` tiene que ser el mismo con el que se abrió el ticket. osTicket
-    no tiene una API nativa para esto, así que el mensaje se escribe directo
-    en la base: no reabre un ticket cerrado, no avisa al agente asignado y
-    no acepta adjuntos (ver ticket_write_repo.responder_ticket).
+    no tiene una API nativa para esto, así que el mensaje (y sus adjuntos)
+    se escriben directo en la base: no reabre un ticket cerrado ni avisa al
+    agente asignado (ver ticket_write_repo.responder_ticket). Mismo límite
+    de tamaño que la creación de tickets (ADJUNTOS_MAX_MB).
     """
     resultado = ticket_service.responder_ticket(
         datos, numero, ip_origen=cliente.ip, org_id=cliente.org_id

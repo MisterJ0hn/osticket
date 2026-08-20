@@ -200,6 +200,30 @@ def _crear_por_sql(datos: CrearTicketRequest, ip_origen: str, motivo: str,
     }
 
 
+def _decodificar_adjuntos(adjuntos: List[Any]) -> List[Dict[str, Any]]:
+    """Valida y decodifica el base64 de cada adjunto antes de escribir nada.
+
+    Igual que osticket_client._adjuntos_a_formato_osticket: se valida acá y
+    no dentro de la transacción, para poder devolver un 400 con un mensaje
+    entendible en vez de un 500 a mitad de la escritura del mensaje.
+    """
+    decodificados = []
+    for adjunto in adjuntos:
+        contenido = adjunto.contenido_base64.strip()
+        try:
+            crudo = base64.b64decode(contenido, validate=True)
+        except Exception as exc:
+            raise DatosInvalidos(
+                f"El adjunto '{adjunto.nombre}' no es base64 válido"
+            ) from exc
+        decodificados.append({
+            "nombre": adjunto.nombre,
+            "tipo_mime": adjunto.tipo_mime,
+            "contenido": crudo,
+        })
+    return decodificados
+
+
 def responder_ticket(datos: ResponderTicketRequest, numero: str,
                      ip_origen: str = "", org_id: int = ORG_TODAS) -> Dict[str, Any]:
     """Agrega un mensaje del cliente a un ticket que ya existe.
@@ -207,7 +231,7 @@ def responder_ticket(datos: ResponderTicketRequest, numero: str,
     No hay API nativa para esto en osTicket v1.18 (solo publica creación de
     tickets), así que se escribe directo en la base: ver las limitaciones
     documentadas en ticket_write_repo.responder_ticket (no reabre un ticket
-    cerrado, no avisa al agente, no acepta adjuntos).
+    cerrado, no avisa al agente).
 
     Se exige que `email` coincida con el dueño del ticket por lo mismo que
     _validar_organizacion en la creación: dejar que cualquier email de la
@@ -215,6 +239,8 @@ def responder_ticket(datos: ResponderTicketRequest, numero: str,
     (a través del contenido del hilo, si el consumidor se lo devuelve) datos
     de un ticket que no es suyo.
     """
+    adjuntos = _decodificar_adjuntos(datos.adjuntos)
+
     with database.transaccion() as conexion:
         ticket = ticket_repo.obtener_ticket(conexion, numero, org_id=org_id)
         if not ticket:
@@ -232,9 +258,14 @@ def responder_ticket(datos: ResponderTicketRequest, numero: str,
             poster=ticket["usuario"]["nombre"] or str(datos.email),
             mensaje=datos.mensaje,
             ip_origen=ip_origen,
+            adjuntos=adjuntos,
         )
 
-    return {"numero": numero, "mensaje_id": resultado["mensaje_id"]}
+    return {
+        "numero": numero,
+        "mensaje_id": resultado["mensaje_id"],
+        "adjuntos_guardados": resultado["adjuntos_guardados"],
+    }
 
 
 def listar_tickets(

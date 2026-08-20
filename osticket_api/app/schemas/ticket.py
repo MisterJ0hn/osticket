@@ -47,6 +47,28 @@ class Adjunto(BaseModel):
         return max(0, (largo * 3) // 4 - relleno)
 
 
+def _validar_tamano_de_adjuntos(adjuntos: List[Adjunto]) -> None:
+    """Rechaza de entrada los adjuntos que no van a caber.
+
+    Sin esto, un envío demasiado grande no falla acá sino más adelante y de
+    forma opaca: PHP corta el cuerpo o se queda sin memoria, osTicket
+    contesta un 500 sin explicación (o, en el camino SQL directo de las
+    respuestas, el proceso se queda sin memoria armando el archivo entero).
+    Se usa desde CrearTicketRequest y ResponderTicketRequest.
+    """
+    if not adjuntos:
+        return
+
+    maximo = settings.ADJUNTOS_MAX_MB * 1024 * 1024
+    total = sum(adjunto.tamano_bytes for adjunto in adjuntos)
+    if total > maximo:
+        raise ValueError(
+            f"Los adjuntos suman {total / 1048576:.1f} MB y el máximo es "
+            f"{settings.ADJUNTOS_MAX_MB} MB. Enviar menos archivos, o "
+            f"comprimir las imágenes antes de adjuntarlas."
+        )
+
+
 class CrearTicketRequest(BaseModel):
     email: EmailStr = Field(..., description="Email del usuario dueño del ticket")
     nombre: Optional[str] = Field(
@@ -73,27 +95,8 @@ class CrearTicketRequest(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _validar_tamano_de_adjuntos(self) -> "CrearTicketRequest":
-        """Rechaza de entrada los adjuntos que no van a caber.
-
-        Sin esto, un envío demasiado grande no falla acá sino más adelante y
-        de forma opaca: PHP corta el cuerpo o se queda sin memoria, osTicket
-        contesta un 500 sin explicación, y la API lo lee como "el helpdesk
-        está caído" y cae al fallback SQL... que descarta los adjuntos. El
-        consumidor recibe un ticket creado a medias en vez de un error que
-        le diga qué arreglar.
-        """
-        if not self.adjuntos:
-            return self
-
-        maximo = settings.ADJUNTOS_MAX_MB * 1024 * 1024
-        total = sum(adjunto.tamano_bytes for adjunto in self.adjuntos)
-        if total > maximo:
-            raise ValueError(
-                f"Los adjuntos suman {total / 1048576:.1f} MB y el máximo es "
-                f"{settings.ADJUNTOS_MAX_MB} MB. Enviar menos archivos, o "
-                f"comprimir las imágenes antes de adjuntarlas."
-            )
+    def _validar_adjuntos(self) -> "CrearTicketRequest":
+        _validar_tamano_de_adjuntos(self.adjuntos)
         return self
 
 
@@ -116,12 +119,19 @@ class ResponderTicketRequest(BaseModel):
                           "con el que abrió el ticket."
     )
     mensaje: str = Field(..., min_length=1, description="Contenido de la respuesta")
+    adjuntos: List[Adjunto] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validar_adjuntos(self) -> "ResponderTicketRequest":
+        _validar_tamano_de_adjuntos(self.adjuntos)
+        return self
 
 
 class ResponderTicketResponse(BaseModel):
     exito: bool = True
     numero: str
     mensaje_id: int
+    adjuntos_guardados: int = 0
 
 
 class Usuario(BaseModel):
