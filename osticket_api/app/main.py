@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.v1.router import api_router
+from app.core.api_logging import registrar_llamadas_api
 from app.core.config import settings
 from app.core.database import verificar_conexion, verificar_esquema
 from app.core.exceptions import ErrorDominio
@@ -46,6 +47,7 @@ async def lifespan(app: FastAPI):
         _avisar_de_clientes()
         _avisar_de_adjuntos()
         _avisar_de_api_key()
+        _avisar_de_log_llamadas()
     yield
 
 
@@ -123,6 +125,33 @@ def _avisar_de_adjuntos() -> None:
         )
 
 
+def _avisar_de_log_llamadas() -> None:
+    """Avisa si el log de llamados está prendido pero falta la tabla.
+
+    Sin esto, el middleware sigue funcionando (el insert falla en silencio,
+    a propósito: ver app/core/api_logging.py) y nadie nota que no se está
+    guardando nada hasta que hace falta auditar un llamado.
+    """
+    from app.core import database
+    from app.repositories import log_repo
+
+    if not settings.API_LOG_LLAMADAS:
+        return
+
+    try:
+        with database.engine.connect() as conexion:
+            existe = log_repo.tabla_existe(conexion)
+    except Exception:
+        logger.exception("No se pudo revisar la tabla api_llamada")
+        return
+
+    if not existe:
+        logger.error(
+            "Falta la tabla api_llamada: correr sql/002_api_llamada.sql. "
+            "Mientras tanto el log de llamados a la API no se guarda."
+        )
+
+
 def _avisar_de_clientes() -> None:
     """Distingue los dos motivos por los que nadie podría autenticarse.
 
@@ -179,6 +208,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.middleware("http")(registrar_llamadas_api)
 
 
 @app.exception_handler(ErrorDominio)

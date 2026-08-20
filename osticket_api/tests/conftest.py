@@ -28,6 +28,7 @@ from app.core.security import (  # noqa: E402
     PERMISO_NOTAS,
     ClienteApi,
 )
+from app.core import api_logging  # noqa: E402
 from app.main import app  # noqa: E402
 
 # ─────────────────────────────────────────────────────────────
@@ -88,6 +89,11 @@ def clientes_api(monkeypatch):
     monkeypatch.setattr(security, "_cache_expira", time.monotonic() + 3600)
     # ultimo_uso escribe en la base: no hay dónde, y no es lo que se prueba.
     monkeypatch.setattr(security, "_registrar_uso", lambda nombre: None)
+    # El log de llamados abre su propia conexión (database.transaccion()),
+    # en un threadpool aparte: sin esto cada test intentaría una conexión
+    # real a MySQL de fondo. Se parchea la función entera y no solo
+    # log_repo.registrar porque la conexión ya se abre antes de llegar ahí.
+    monkeypatch.setattr(api_logging, "_guardar_log", lambda **kw: None)
     yield cache
 
 

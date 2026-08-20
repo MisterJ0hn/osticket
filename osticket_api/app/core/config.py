@@ -78,6 +78,13 @@ class Settings(BaseSettings):
     TRUSTED_PROXIES: str = ""
     CORS_ORIGINS: str = "*"
 
+    # ── Log de llamados (tabla api_llamada) ──
+    API_LOG_LLAMADAS: bool = True
+    # Tope del request/response ya redactado (sin el base64 de los
+    # adjuntos) que se guarda por fila. Es una red de seguridad: evita que
+    # un payload inesperadamente grande infle la tabla.
+    API_LOG_BODY_MAX_CHARS: int = 4000
+
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
