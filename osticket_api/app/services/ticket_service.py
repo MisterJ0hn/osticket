@@ -17,7 +17,12 @@ from app.core.exceptions import (
 )
 from app.core.security import ORG_TODAS
 from app.repositories import ticket_repo, ticket_write_repo
-from app.schemas.ticket import CrearTicketRequest, FiltroEstado, OrigenCreacion
+from app.schemas.ticket import (
+    CrearTicketRequest,
+    FiltroEstado,
+    OrigenCreacion,
+    ResponderTicketRequest,
+)
 from app.services import osticket_client
 
 logger = logging.getLogger(__name__)
@@ -193,6 +198,43 @@ def _crear_por_sql(datos: CrearTicketRequest, ip_origen: str, motivo: str,
         "origen": OrigenCreacion.FALLBACK_SQL,
         "mensaje": aviso,
     }
+
+
+def responder_ticket(datos: ResponderTicketRequest, numero: str,
+                     ip_origen: str = "", org_id: int = ORG_TODAS) -> Dict[str, Any]:
+    """Agrega un mensaje del cliente a un ticket que ya existe.
+
+    No hay API nativa para esto en osTicket v1.18 (solo publica creación de
+    tickets), así que se escribe directo en la base: ver las limitaciones
+    documentadas en ticket_write_repo.responder_ticket (no reabre un ticket
+    cerrado, no avisa al agente, no acepta adjuntos).
+
+    Se exige que `email` coincida con el dueño del ticket por lo mismo que
+    _validar_organizacion en la creación: dejar que cualquier email de la
+    organización responda cualquier ticket permitiría que un cliente vea
+    (a través del contenido del hilo, si el consumidor se lo devuelve) datos
+    de un ticket que no es suyo.
+    """
+    with database.transaccion() as conexion:
+        ticket = ticket_repo.obtener_ticket(conexion, numero, org_id=org_id)
+        if not ticket:
+            raise RecursoNoEncontrado(f"No existe el ticket {numero}")
+
+        propietario = (ticket["usuario"]["email"] or "").strip().lower()
+        if propietario != str(datos.email).strip().lower():
+            raise DatosInvalidos("El email no coincide con el dueño del ticket")
+
+        resultado = ticket_write_repo.responder_ticket(
+            conexion,
+            ticket_id=ticket["ticket_id"],
+            thread_id=ticket["_thread_id"],
+            user_id=ticket["usuario"]["id"],
+            poster=ticket["usuario"]["nombre"] or str(datos.email),
+            mensaje=datos.mensaje,
+            ip_origen=ip_origen,
+        )
+
+    return {"numero": numero, "mensaje_id": resultado["mensaje_id"]}
 
 
 def listar_tickets(

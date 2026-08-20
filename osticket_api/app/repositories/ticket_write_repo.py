@@ -384,3 +384,73 @@ def crear_ticket(
     )
 
     return {"numero": numero, "ticket_id": ticket_id, "user_id": user_id}
+
+
+def responder_ticket(
+    conexion: Connection,
+    *,
+    ticket_id: int,
+    thread_id: int,
+    user_id: int,
+    poster: str,
+    mensaje: str,
+    ip_origen: str = "",
+) -> Dict[str, Any]:
+    """Agrega un mensaje del cliente al hilo de un ticket que ya existe.
+
+    osTicket v1.18 no publica ninguna API nativa para esto (su dispatcher
+    solo tiene POST /api/tickets.* para CREAR, ver upload/include/api.tickets.php):
+    esto no es un fallback, es el único camino. Réplica mínima de lo que hace
+    Ticket::onMessage() al llegar un mensaje del usuario (upload/include/
+    class.ticket.php:1889): agrega la entrada del hilo y marca isanswered=0
+    con el lastupdate/lastmessage al día.
+
+    Lo que NO hace, a propósito:
+      * no reabre el ticket si está cerrado (reopen() recalcula el SLA y
+        reasigna el estado según configuración; replicarlo a mano es
+        arriesgado). Si el ticket está cerrado, el mensaje igual se guarda,
+        pero un agente tiene que reabrirlo a mano.
+      * no manda alerta al agente asignado ni a los colaboradores.
+      * no acepta adjuntos (mismo motivo que crear_ticket: escribir en
+        ost_file/ost_file_chunk depende del backend de almacenamiento
+        configurado).
+    """
+    cuerpo = rfc2397.parsear_mensaje(mensaje)
+
+    entry_id = conexion.execute(
+        text(f"""
+            INSERT INTO {P}thread_entry
+                (pid, thread_id, staff_id, user_id, type, flags, poster, source,
+                 title, body, format, ip_address, created, updated)
+            VALUES
+                (0, :thread_id, 0, :user_id, 'M', 0, :poster, 'API',
+                 '', :cuerpo, :formato, :ip, NOW(), NOW())
+        """),
+        {
+            "thread_id": thread_id,
+            "user_id": user_id,
+            "poster": poster[:128],
+            "cuerpo": cuerpo.texto,
+            "formato": cuerpo.formato,
+            "ip": (ip_origen or "")[:64],
+        },
+    ).lastrowid
+
+    conexion.execute(
+        text(f"UPDATE {P}thread SET lastmessage = NOW() WHERE id = :thread_id"),
+        {"thread_id": thread_id},
+    )
+    conexion.execute(
+        text(f"""
+            UPDATE {P}ticket SET isanswered = 0, lastupdate = NOW()
+            WHERE ticket_id = :ticket_id
+        """),
+        {"ticket_id": ticket_id},
+    )
+
+    logger.warning(
+        "Mensaje %s agregado al ticket_id=%s por SQL directo: no se reabre "
+        "si estaba cerrado ni se avisa al agente asignado", entry_id, ticket_id,
+    )
+
+    return {"mensaje_id": entry_id}

@@ -12,6 +12,8 @@ from app.schemas.ticket import (
     EstadoTicketResponse,
     FiltroEstado,
     ListaTicketsResponse,
+    ResponderTicketRequest,
+    ResponderTicketResponse,
     TicketDetalle,
 )
 from app.services import ticket_service
@@ -95,6 +97,30 @@ def listar_tickets(
         tamano=tamano,
     )
     return ListaTicketsResponse(**resultado)
+
+
+@router.post(
+    "/{numero}/mensajes",
+    response_model=ResponderTicketResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Responder un ticket",
+)
+def responder_ticket(
+    datos: ResponderTicketRequest,
+    numero: str = Path(..., description="Número del ticket (el que ve el cliente)"),
+    cliente: ClienteApi = Depends(exigir(PERMISO_CREAR)),
+) -> ResponderTicketResponse:
+    """Agrega un mensaje del cliente al hilo de un ticket ya existente.
+
+    `email` tiene que ser el mismo con el que se abrió el ticket. osTicket
+    no tiene una API nativa para esto, así que el mensaje se escribe directo
+    en la base: no reabre un ticket cerrado, no avisa al agente asignado y
+    no acepta adjuntos (ver ticket_write_repo.responder_ticket).
+    """
+    resultado = ticket_service.responder_ticket(
+        datos, numero, ip_origen=cliente.ip, org_id=cliente.org_id
+    )
+    return ResponderTicketResponse(**resultado)
 
 
 @router.get(

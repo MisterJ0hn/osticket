@@ -110,6 +110,20 @@ class CrearTicketResponse(BaseModel):
     mensaje: Optional[str] = None
 
 
+class ResponderTicketRequest(BaseModel):
+    email: EmailStr = Field(
+        ..., description="Email del usuario dueño del ticket. Debe coincidir "
+                          "con el que abrió el ticket."
+    )
+    mensaje: str = Field(..., min_length=1, description="Contenido de la respuesta")
+
+
+class ResponderTicketResponse(BaseModel):
+    exito: bool = True
+    numero: str
+    mensaje_id: int
+
+
 class Usuario(BaseModel):
     id: Optional[int] = None
     nombre: Optional[str] = None
